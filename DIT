@@ -1,22 +1,89 @@
 #!/bin/bash
+#
+# DIT - build the k4s initramfs.
+#
+# Fetches each component over HTTPS at an exact pinned revision, tidies it, and
+# assembles a single BusyBox-style initramfs with gobusybox.
+#
+# Two deliberate changes from the original script:
+#
+#   * HTTPS instead of SSH. These repositories are public, so no key material
+#     is needed: the build runs on a clean host or CI runner, and nothing
+#     secret can leak into the log or into a checkout's .git/config.
+#
+#   * Exact revisions instead of `--depth 1` on default branches. Branch tips
+#     move, so the original produced a different dependency graph on every run;
+#     the current containerd tip, for example, already requires Go 1.27. The
+#     revisions below are the upstream tips from the era this repository was
+#     written (2026-05-01 through 2026-05-12). They are all `go` <= 1.26.2, so
+#     they remain valid for the committed go.work. Move a component by editing
+#     its *_REF deliberately.
+#
+# go.work is committed and is NOT regenerated here: it already lists every
+# module below, and it carries the dependency pin the build relies on. Note
+# that `go work init` refuses to overwrite an existing workspace, so the old
+# `go work init u-root` line was a silent no-op and has been removed.
 
-set -x
+set -euxo pipefail
 
-git clone --depth 1 git@github.com:u-root/u-root
-go work init u-root
-# git clone --depth 1 git@github.com:k3s-io/k3s.git
-git clone --depth 1 git@github.com:containerd/containerd
-git clone --depth 1 git@github.com:coredns/coredns.git
-git clone --depth 1 git@github.com:etcd-io/etcd.git
-git clone --depth 1 -b purego git@github.com:u-root/flannel
-git clone --depth 1 -b purego git@github.com:u-root/runc
+# --- pinned revisions -------------------------------------------------------
+UROOT_REPO=https://github.com/u-root/u-root.git
+UROOT_REF=25f9f897fcf2d5431b43daccc970215713547268       # main, 2026-05-01
 
-set -e
+CONTAINERD_REPO=https://github.com/containerd/containerd.git
+CONTAINERD_REF=ed061a08de19ce99d223c60dfdbdf6054dd94290  # main, 2026-05-01
+
+COREDNS_REPO=https://github.com/coredns/coredns.git
+COREDNS_REF=145029c847d3f4c4d36918f8658631f40616745f     # master, 2026-05-01
+
+ETCD_REPO=https://github.com/etcd-io/etcd.git
+ETCD_REF=0bd70ca863d9f36c2776ef7f38cd35f12cca8d4a       # main, 2026-05-01
+
+FLANNEL_REPO=https://github.com/u-root/flannel.git
+FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (pure-Go proxy)
+
+RUNC_REPO=https://github.com/u-root/runc.git
+RUNC_REF=fc66d646733b11c77772d251a6cb542df8698c06        # purego, 2026-05-01
+
+# --- fetch ------------------------------------------------------------------
+# Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
+# what makes the image reproducible. An existing checkout is reused, so a rerun
+# after a failed build does not die on "destination path already exists".
+clone_pinned() {
+	local dir=$1 repo=$2 ref=$3
+	if [ ! -e "$dir" ]; then
+		git init -q "$dir"
+		git -C "$dir" remote add origin "$repo"
+	elif [ ! -d "$dir/.git" ]; then
+		echo "error: $dir exists and is not a git checkout" >&2
+		exit 1
+	fi
+	git -C "$dir" remote set-url origin "$repo"
+	git -C "$dir" fetch -q --depth 1 origin "$ref"
+	git -C "$dir" checkout -q --detach FETCH_HEAD
+}
+
+echo "Fetching pinned components"
+clone_pinned u-root     "$UROOT_REPO"     "$UROOT_REF"
+clone_pinned containerd "$CONTAINERD_REPO" "$CONTAINERD_REF"
+clone_pinned coredns    "$COREDNS_REPO"    "$COREDNS_REF"
+clone_pinned etcd       "$ETCD_REPO"       "$ETCD_REF"
+clone_pinned flannel    "$FLANNEL_REPO"    "$FLANNEL_REF"
+clone_pinned runc       "$RUNC_REPO"       "$RUNC_REF"
+
+# --- tidy -------------------------------------------------------------------
 (cd containerd && go mod tidy)
 (cd coredns && go mod tidy)
 (cd etcd/etcdctl && go mod tidy)
 (cd flannel && go mod tidy)
 (cd runc && go mod tidy)
-(cd u-root && go mod tidy && GOARCH= GOOS= go build)
-./u-root/u-root -o initramfs.cpio u-root/cmds/core/* runc/ ./containerd/cmd/containerd ./flannel ./coredns ./etcd/etcdctl
+(cd u-root && go mod tidy && env -u GOARCH -u GOOS go build)
 
+# --- assemble ---------------------------------------------------------------
+./u-root/u-root -o initramfs.cpio \
+	u-root/cmds/core/* \
+	runc/ \
+	./containerd/cmd/containerd \
+	./flannel \
+	./coredns \
+	./etcd/etcdctl
