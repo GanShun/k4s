@@ -110,7 +110,8 @@ Gitignored build inputs (cloned by `DIT`) include `u-root/`, `containerd/`,
 `DIT` (`set -euxo pipefail`) does four things.
 
 **1. Clone pinned.** Every component is fetched over **HTTPS at an exact SHA** —
-public repos, no SSH keys, reproducible graph. `clone_pinned` is idempotent: an
+public repos, no SSH keys, reproducible graph — with one exception: `runc` is
+built from the local checkout (see its row in the table). `clone_pinned` is idempotent: an
 existing checkout is reused and re-fetched, so a rerun after a failure does not
 die on "destination path already exists". To move a component, edit its
 `*_REF` deliberately.
@@ -124,7 +125,7 @@ die on "destination path already exists". To move a component, edit its
 | flannel | `0567dde14a09315931e55c3cb77d43f53e0e1db3` (`purego`) |
 | kubernetes | `1c2e10a409eb1b03f2f28f401ce935312e20d9fb` (v1.35.8) |
 | cni-plugins | `257ef09a103e8b8fe91a0fefe8680c01f84b520b` (loopback only) |
-| runc | `GanShun/runc` @ `1b3411e2` — a fork with a Go namespace path and a Go seccomp compiler |
+| runc | **not pinned** — the local `runc/` checkout is built as it stands, and `RUNC_REF` = `7215222c` only creates it when it is missing. A fork with a Go namespace path and a Go seccomp compiler |
 
 **2. Tidy.** `go mod tidy` in each module, then a u-root build.
 
@@ -204,7 +205,10 @@ container's own `K4S_CONTAINER_OK` output.
   the eviction policy, log shipping and GPU design.
 - **HTTPS + exact SHAs**, never SSH or branch tips. The original `DIT` used
   `git@github.com:` and `--depth 1` on moving branches, so the dependency graph
-  changed run to run.
+  changed run to run. **`runc` is the exception**: it is the one component with a
+  fork that this project develops, so `DIT` builds `runc/` as it stands and the
+  pin only creates that checkout when there is not one. `DIT` prints the
+  revision and branch it built. Everything else stays strictly pinned.
 - **`go.work` committed**, not generated.
 - **`runc` is a fork that builds cgo-free.** Upstream's `purego` branch only
   *deletes* the cgo namespace constructor, so its `CGO_ENABLED=0` runc cannot

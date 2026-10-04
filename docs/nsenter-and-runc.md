@@ -1,7 +1,7 @@
 # nsenter and running runc without cgo
 
 This note explains why container runtimes are normally C/cgo, why the u-root
-`purego` runc fails, and how `third_party/runc` makes a `CGO_ENABLED=0` runc
+`purego` runc fails, and how the runc fork makes a `CGO_ENABLED=0` runc
 work for rootful containers.
 
 ## What `nsenter` is
@@ -74,7 +74,7 @@ Two things are needed, and both are on the **parent** side:
    `bootstrapData`; nothing consumes it, and it would desync the child's read
    of the `initConfig` JSON that follows on the same pipe.
 
-That is the whole change (`third_party/runc`). The child is untouched: its Go
+That is the whole change (see `libcontainer/purego_*.go` in the fork). The child is untouched: its Go
 `startInitialization()` already decodes `initConfig` and runs the
 `procReady`/`procRun` sync.
 
