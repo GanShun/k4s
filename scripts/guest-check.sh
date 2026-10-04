@@ -19,7 +19,11 @@ echo hello > /tmp/k4s/test && echo "K4S_CHECK: tmpfs: ok" || echo "K4S_CHECK: tm
 
 containerd --version && echo "K4S_CHECK: containerd: ok" || echo "K4S_CHECK: containerd: fail"
 coredns -version && echo "K4S_CHECK: coredns: ok" || echo "K4S_CHECK: coredns: fail"
-ip link >/dev/null && echo "K4S_CHECK: net: ok" || echo "K4S_CHECK: net: fail"
+# Network: QEMU user-mode NIC. dhclient must be told IPv4 only, or it blocks
+# forever waiting for a DHCPv6 server that does not exist.
+ip link set eth0 up
+dhclient -ipv6=false -timeout 10 eth0
+ip -4 addr show dev eth0 | grep -q 'inet ' && echo "K4S_CHECK: net: ok" || echo "K4S_CHECK: net: fail"
 
 # runc and containerd want a cgroup2 hierarchy; u-root's init leaves none.
 mkdir -p /sys/fs/cgroup

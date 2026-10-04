@@ -33,6 +33,7 @@ echo "booting $KERNEL with $IMAGE (timeout ${K4S_BOOT_TIMEOUT}s)"
 set +e
 timeout "$K4S_BOOT_TIMEOUT" qemu-system-x86_64 \
 	-M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
+	-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 	-kernel "$KERNEL" -initrd "$IMAGE" \
 	-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
 	-nographic -no-reboot \
