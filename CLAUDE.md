@@ -23,12 +23,19 @@ make image     # build initramfs.cpio (runs ./DIT)
 make kernel    # configure + build linux/ into build/kernel/bzImage
 make run       # boot the image interactively under QEMU
 make test      # boot headless and run scripts/guest-check.sh
+make test-cluster  # M1: throwaway control plane + kubelet joins + pod runs
 make clean     # remove build products (keeps the kernel checkout)
 ```
 
 `make test` prints three verdict lines — `boot: ok`, `capabilities: ok`,
 `container: ok` — and a `guest log:` path. `K4S_BOOT_TIMEOUT` (seconds, default
 180) caps the guest run.
+
+`make test-cluster` is the M1 join test and takes a few minutes: it builds the
+control-plane binaries, generates throwaway PKI, boots the node twice (join,
+then reboot-and-rejoin) and prints `node: ok`, `pod: ok`, `cluster: ok`.
+`K4S_BOOTS` (default 2) sets the number of boots. It leaves the control plane
+running, and regenerates etcd on every run.
 
 Two prerequisites are **not** built by `make`:
 
@@ -46,10 +53,13 @@ Two prerequisites are **not** built by `make`:
 | Path | What |
 | --- | --- |
 | `DIT` | The build: pinned clone → tidy → standalone binaries → assemble |
-| `Makefile` | `image`/`kernel`/`run`/`test` wrappers |
+| `Makefile` | `image`/`kernel`/`run`/`test`/`test-cluster` wrappers |
 | `configs/k4s-tiny.config` | Kernel fragment appended over `tinyconfig` |
+| `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflist, smoke pod |
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
+| `scripts/test-cluster.sh` | M1 join test: throwaway control plane + two guest boots |
+| `scripts/cluster-check.sh` | The guest half of that test, piped into gosh |
 | `third_party/runc/` | Fork of `u-root/runc`: pure-Go (cgo-free) namespaces |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/nsenter-and-runc.md` | Why runc normally needs cgo, and the fork |
@@ -77,6 +87,7 @@ die on "destination path already exists". To move a component, edit its
 | etcd | `0bd70ca863d9f36c2776ef7f38cd35f12cca8d4a` |
 | flannel | `0567dde14a09315931e55c3cb77d43f53e0e1db3` (`purego`) |
 | kubernetes | `1c2e10a409eb1b03f2f28f401ce935312e20d9fb` (v1.35.8) |
+| cni-plugins | `257ef09a103e8b8fe91a0fefe8680c01f84b520b` (loopback only) |
 | runc | **not cloned** — `third_party/runc`, fork of `u-root/runc@fc66d646` |
 
 **2. Tidy.** `go mod tidy` in each module, then a u-root build.
@@ -125,8 +136,10 @@ Fragment entries that are load-bearing and non-obvious:
 - `CONFIG_FILE_LOCKING` — without it containerd's bolt metadata plugin fails
   with `ENOSYS` and never creates its gRPC socket.
 - `CONFIG_ACPI` — needed for `poweroff` in the test (QEMU `-no-reboot`).
-- `CONFIG_CGROUP_SCHED`, `FAIR_GROUP_SCHED`, `MEMCG`, `BLK_CGROUP`,
-  `CGROUP_PIDS/DEVICE/FREEZER` — runc's cgroup setup.
+- `CONFIG_CGROUP_SCHED`, `FAIR_GROUP_SCHED`, `CFS_BANDWIDTH`, `MEMCG`,
+  `BLK_CGROUP`, `CGROUP_PIDS/DEVICE/FREEZER` — runc's cgroup setup;
+  `CFS_BANDWIDTH` is what creates `cpu.max`, without which every pod container
+  fails to start.
 
 ## Test harness
 
@@ -167,6 +180,10 @@ container's own `K4S_CONTAINER_OK` output.
 
 ## Known limitations
 
+- **Seccomp is not enforced.** kubelet asks for `RuntimeDefault` on the pod
+  sandbox unconditionally and runc can only enforce seccomp with cgo +
+  libseccomp, so the cgo-free build warns and runs without it. This is the
+  largest security gap in the pure-Go runtime; see `docs/nsenter-and-runc.md`.
 - **Rootless / user namespaces**: not supported. `CLONE_NEWUSER` plus the other
   namespaces in one `clone` returns `EPERM`; nsexec's staged unshare is the
   missing piece. The node runs containers as root, so this does not block it.
@@ -181,9 +198,9 @@ container's own `K4S_CONTAINER_OK` output.
 
 ## Status
 
-Branch `boot-qemu`. M0 (bootable image + QEMU loop) is done and committed:
-`make test` boots, passes the capability check, and runs a real container in its
-own namespaces (`Pid: 1`). M1 (kubelet and joining a throwaway cluster) is in
-progress: kubelet is wired into `DIT` and `guest-check.sh`; the cluster join —
-guest networking plus an apiserver to join — is not yet built. See
-`docs/roadmap.md` for M1–M3 acceptance criteria.
+Branch `boot-qemu`. M0 (bootable image + QEMU loop) and **M1 (kubelet joins a
+throwaway cluster, runs a pod, and returns after a reboot)** are done:
+`make test` passes the capability check and runs a container, and
+`make test-cluster` joins, runs the smoke pod, reboots, rejoins and runs it
+again. `docs/roadmap.md` has the M1 findings; M2 (ephemeral hygiene, kill
+switch) and M3 (GPU) are next.

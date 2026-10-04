@@ -25,7 +25,7 @@ QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
               -kernel $(KERNEL) -initrd $(IMAGE) \
               -append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" -no-reboot
 
-.PHONY: all image kernel run test clean distclean
+.PHONY: all image kernel run test test-cluster clean distclean
 
 all: image
 
@@ -56,6 +56,10 @@ run: kernel $(IMAGE)
 
 test: kernel $(IMAGE)
 	scripts/test-boot.sh $(KERNEL) $(IMAGE)
+
+# M1 join test: a throwaway control plane on the host, kubelet in the guest.
+test-cluster: kernel $(IMAGE)
+	scripts/test-cluster.sh $(KERNEL) $(IMAGE)
 
 clean:
 	-$(MAKE) -C $(LINUX) O=$(ABS_BUILD) clean

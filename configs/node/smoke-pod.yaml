@@ -1,0 +1,37 @@
+# The M1 smoke pod.
+#
+# hostNetwork, deliberately: the node has no CNI, and a pod that asks for one
+# would block in the sandbox network step. It also keeps this test about the
+# kubelet -> containerd -> runc path rather than about CNI, which is undecided.
+#
+# nodeName pins it to the node instead of going through the scheduler, because
+# the throwaway control plane in scripts/test-cluster.sh runs only etcd and
+# kube-apiserver (no scheduler, no controller-manager).
+#
+# The container writes a marker to a hostPath so the guest can prove it ran
+# without the apiserver needing to reach kubelet to fetch logs.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-smoke
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  hostNetwork: true
+  # Always, not Never: the node is diskless, so a reboot wipes containerd's
+  # state and the container kubelet knew about is gone. With Never kubelet
+  # settles on ContainerStatusUnknown and does not bring it back; with Always
+  # it recreates it, which is what "the workload returns" means here.
+  restartPolicy: Always
+  containers:
+    - name: smoke
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "echo K4S_POD_OK > /out/result; sleep 3600"]
+      volumeMounts:
+        - name: out
+          mountPath: /out
+  volumes:
+    - name: out
+      hostPath:
+        path: /var/log/k4s-smoke
+        type: DirectoryOrCreate

@@ -95,6 +95,36 @@ ran a chrooted static binary (`NS_PROBE_OK`). Then the patched runc, built
 `/proc/self/status` reported `Pid: 1` with its own PID-namespace inode — real
 isolation, not the host's namespaces.
 
+## Seccomp is not enforced (security gap)
+
+`InitSeccomp` is the other cgo-only piece: `libcontainer/seccomp/seccomp_linux.go`
+is built with `cgo && seccomp` and calls libseccomp. The cgo-free build has only
+a stub that returns `ErrSeccompNotEnabled`.
+
+That would be survivable if seccomp were opt-in, but it is not. kubelet
+**unconditionally** sets `RuntimeDefault` on the pod sandbox
+(`kubernetes/pkg/kubelet/kuberuntime/kuberuntime_sandbox.go`, "use least
+privileged seccomp profiles at pod level"), so containerd puts a
+`linux.seccomp` section in the OCI spec for every pod. A fail-closed runc then
+makes every pod unschedulable:
+
+```
+runc create failed: error during container init:
+  seccomp: config provided but seccomp not supported
+```
+
+`third_party/runc` therefore makes the cgo-free build **warn and continue**
+without seccomp (`libcontainer/seccomp/k4s_nocgo.go`), while every other build
+keeps upstream's fail-closed behaviour (`k4s_strict.go`). The effect is that the
+node runs containers with no seccomp filtering at all: a real reduction in
+isolation, and the first thing to close before this runtime is used for
+anything untrusted.
+
+The fix is a pure-Go seccomp path: assemble the classic-BPF program from the
+runtime-spec `LinuxSeccomp` struct (`golang.org/x/net/bpf`) and install it with
+`seccomp(2)` or `prctl(PR_SET_SECCOMP)`. libseccomp is a convenience, not a
+requirement.
+
 ## What is not covered
 
 - **User namespaces / rootless.** A single `clone(2)` with `CLONE_NEWUSER`

@@ -48,6 +48,9 @@ FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (p
 KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
 KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8
 
+CNI_REPO=https://github.com/containernetworking/plugins.git
+CNI_REF=257ef09a103e8b8fe91a0fefe8680c01f84b520b           # main, 2026-09-15
+
 # --- fetch ------------------------------------------------------------------
 # Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
 # what makes the image reproducible. An existing checkout is reused, so a rerun
@@ -73,6 +76,7 @@ clone_pinned coredns    "$COREDNS_REPO"    "$COREDNS_REF"
 clone_pinned etcd       "$ETCD_REPO"       "$ETCD_REF"
 clone_pinned flannel    "$FLANNEL_REPO"    "$FLANNEL_REF"
 clone_pinned kubernetes "$KUBERNETES_REPO" "$KUBERNETES_REF"
+clone_pinned cni-plugins "$CNI_REPO" "$CNI_REF"
 
 # --- tidy -------------------------------------------------------------------
 (cd containerd && go mod tidy)
@@ -104,12 +108,28 @@ mkdir -p build
 (cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
 	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=v1.35.8" \
 	-o ../build/kubelet ./cmd/kubelet)
+# loopback is the minimum CNI plugin. With no conflist on disk the CRI reports
+# NetworkReady=false, and kubelet then refuses to mark the node Ready or run
+# pods. The node's real CNI is undecided; this is enough for M1.
+(cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/loopback ./plugins/main/loopback)
 
 # --- assemble ---------------------------------------------------------------
+# Node configuration that is not a secret. The kubelet kubeconfig is NOT here:
+# it is issued by the cluster and spliced in by scripts/test-cluster.sh.
+# The CA bundle is required for HTTPS image pulls; u-root ships no trust store.
+CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 ./u-root/u-root -o initramfs.cpio \
 	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \
 	-files build/runc:bin/runc \
 	-files build/kubelet:bin/kubelet \
+	-files "$CA_BUNDLE":etc/ssl/certs/ca-certificates.crt \
+	-files configs/node/kubelet.yaml:etc/kubernetes/kubelet.yaml \
+	-files configs/node/passwd:etc/passwd \
+	-files configs/node/group:etc/group \
+	-files configs/node/hosts:etc/hosts \
+	-files build/loopback:opt/cni/bin/loopback \
+	-files configs/node/10-loopback.conflist:etc/cni/net.d/10-loopback.conflist \
 	u-root/cmds/core/* \
 	./containerd/cmd/containerd \
 	./containerd/cmd/ctr \

@@ -75,13 +75,39 @@ UEFI PXE
 - Acceptance: `make run` boots a u-root shell; a rebuild from a clean checkout
   produces the same image.
 
-### M1 — kubelet spike and the first real node
+### M1 — kubelet spike and the first real node (done)
 
 - Spike: prove a `CGO_ENABLED=0` static `kubelet` for `linux/amd64` (below).
 - containerd CRI config; tmpfs for `/var/lib/containerd` and `--root-dir`;
   swap off; kubelet flags for ephemeral root.
 - Join a throwaway test cluster and run a pod.
 - Acceptance: reboot the QEMU VM, it rejoins, the workload returns.
+
+**Status: done (2026-10-04).** `make test-cluster` stands up a throwaway control
+plane on the host (etcd and kube-apiserver built from the pinned sources), issues
+a kubelet kubeconfig, splices it into a copy of the initramfs, boots the node,
+waits for it to register, applies `configs/node/smoke-pod.yaml`, and checks the
+container wrote its marker to a hostPath. It then boots the *same image* again
+and checks the node rejoins and the pod returns.
+
+Five things the node image needed, each found by a distinct failure:
+
+| Missing | Symptom |
+| --- | --- |
+| `/etc/passwd`, `/etc/group` | kubelet will not start at all: its user-namespace manager opens `/etc/passwd` (`create user namespace manager: ... no such file or directory`) |
+| `/etc/hosts` | containerd cannot start the sandbox (`failed to generate sandbox hosts file ... open /etc/hosts`) |
+| a CNI conflist | the node never leaves `NotReady` (`NetworkReady=false ... cni plugin not initialized`), so kubelet never runs a pod |
+| `CONFIG_CFS_BANDWIDTH` | there is no `cpu.max` in a cgroup v2 leaf, so `runc create` fails on the pod container |
+| cgroup2 `subtree_control` | the same `cpu.max` failure: u-root's init mounts cgroup2 but enables no controllers |
+
+One deliberate trade-off: **seccomp**. kubelet asks for `RuntimeDefault` on the
+pod sandbox unconditionally, and runc can only enforce seccomp with cgo plus
+libseccomp, so the cgo-free build warns and continues without it. That is a real
+loss of isolation, written up in `docs/nsenter-and-runc.md`.
+
+Still open from M1: the smoke pod is `hostNetwork: true` because CNI is
+undecided, and the pod is pinned with `nodeName` because the throwaway control
+plane has no scheduler.
 
 ### M2 — Ephemeral hygiene and the kill switch
 

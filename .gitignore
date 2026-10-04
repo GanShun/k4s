@@ -32,6 +32,7 @@ go.work.sum
 
 # Cloned build inputs (third_party/ is committed and not listed here)
 container*
+cni-plugins
 u-root
 kubernetes
 flannel

@@ -24,6 +24,11 @@ This fork adds a build-tagged pure-Go path:
 - `libcontainer/process_linux.go`, `initProcess.start`: under
   `puregoNamespaces` it uses the direct child PID and skips the bootstrap-data
   write, the PID pipe read, and `waitForChildExit`.
+- `libcontainer/seccomp/seccomp_unsupported.go` plus `k4s_nocgo.go` /
+  `k4s_strict.go`: seccomp is also cgo-only. kubelet requests `RuntimeDefault`
+  on the pod sandbox unconditionally, so the cgo-free build warns and continues
+  without seccomp instead of failing every pod. **This means no seccomp
+  filtering on a cgo-free node** — see `docs/nsenter-and-runc.md`.
 
 See `docs/nsenter-and-runc.md` for why this works and what it does not cover
 (user namespaces).

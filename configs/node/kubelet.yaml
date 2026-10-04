@@ -1,0 +1,18 @@
+# kubelet configuration for the k4s node image.
+#
+# cgroupfs, not kubelet's systemd default: the node has no systemd and no dbus,
+# only a cgroup2 mount. containerd's default (SystemdCgroup = false) matches,
+# and a mismatch makes kubelet refuse to start.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: cgroupfs
+containerRuntimeEndpoint: unix:///run/containerd/containerd.sock
+failSwapOn: false
+resolvConf: /etc/resolv.conf
+# kubelet defaults to RuntimeDefault seccomp, which hands runc a seccomp
+# profile. runc only supports seccomp behind cgo + libseccomp (build tag
+# "seccomp"), so a cgo-free runc fails the sandbox with "config provided but
+# seccomp not supported". Until there is a pure-Go seccomp path the node runs
+# Unconfined; this is a real loss of isolation, see docs/nsenter-and-runc.md.
+# (The KubeletConfiguration field is a bool; the CLI flag is a string.)
+seccompDefault: false
