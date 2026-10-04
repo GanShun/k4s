@@ -45,6 +45,9 @@ FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (p
 # runc is not cloned: third_party/runc is a fork of u-root/runc@fc66d646 (the
 # purego branch) carrying the pure-Go namespace path. See third_party/README.md.
 
+KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
+KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8
+
 # --- fetch ------------------------------------------------------------------
 # Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
 # what makes the image reproducible. An existing checkout is reused, so a rerun
@@ -69,6 +72,7 @@ clone_pinned containerd "$CONTAINERD_REPO" "$CONTAINERD_REF"
 clone_pinned coredns    "$COREDNS_REPO"    "$COREDNS_REF"
 clone_pinned etcd       "$ETCD_REPO"       "$ETCD_REF"
 clone_pinned flannel    "$FLANNEL_REPO"    "$FLANNEL_REF"
+clone_pinned kubernetes "$KUBERNETES_REPO" "$KUBERNETES_REF"
 
 # --- tidy -------------------------------------------------------------------
 (cd containerd && go mod tidy)
@@ -95,11 +99,17 @@ mkdir -p build
 	-o ../build/containerd-shim-runc-v2 ./cmd/containerd-shim-runc-v2)
 (cd third_party/runc && CGO_ENABLED=0 env -u GOARCH -u GOOS go build \
 	-o ../../build/runc .)
+# kubelet is pure Go, but it is one large binary rather than a bb applet.
+# The version stamp keeps the apiserver skew check happy.
+(cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
+	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=v1.35.8" \
+	-o ../build/kubelet ./cmd/kubelet)
 
 # --- assemble ---------------------------------------------------------------
 ./u-root/u-root -o initramfs.cpio \
 	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \
 	-files build/runc:bin/runc \
+	-files build/kubelet:bin/kubelet \
 	u-root/cmds/core/* \
 	./containerd/cmd/containerd \
 	./containerd/cmd/ctr \

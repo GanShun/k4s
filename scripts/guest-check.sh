@@ -34,6 +34,7 @@ sleep 5
 ctr version >/dev/null 2>&1 && echo "K4S_CHECK: ctr: ok" || echo "K4S_CHECK: ctr: fail"
 
 containerd-shim-runc-v2 -v >/dev/null 2>&1 && echo "K4S_CHECK: shim: ok" || echo "K4S_CHECK: shim: fail"
+kubelet --version >/dev/null 2>&1 && echo "K4S_CHECK: kubelet: ok" || echo "K4S_CHECK: kubelet: fail"
 
 # No image needed: bb is static, so a copy plus one symlink gives the
 # container an /bin/echo.
