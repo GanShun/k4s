@@ -9,10 +9,7 @@ cgroupDriver: cgroupfs
 containerRuntimeEndpoint: unix:///run/containerd/containerd.sock
 failSwapOn: false
 resolvConf: /etc/resolv.conf
-# kubelet defaults to RuntimeDefault seccomp, which hands runc a seccomp
-# profile. runc only supports seccomp behind cgo + libseccomp (build tag
-# "seccomp"), so a cgo-free runc fails the sandbox with "config provided but
-# seccomp not supported". Until there is a pure-Go seccomp path the node runs
-# Unconfined; this is a real loss of isolation, see docs/nsenter-and-runc.md.
-# (The KubeletConfiguration field is a bool; the CLI flag is a string.)
-seccompDefault: false
+# The runc fork enforces seccomp without cgo, so the node keeps kubelet's
+# RuntimeDefault rather than weakening it. (The KubeletConfiguration field is a
+# bool; the CLI flag is a string.)
+seccompDefault: true

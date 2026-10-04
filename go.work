@@ -3,7 +3,7 @@ go 1.26.2
 use (
 	./containerd
 	./flannel
-	./third_party/runc
+	./runc
 	./u-root
 	./coredns
 	./etcd/etcdctl

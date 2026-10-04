@@ -30,7 +30,7 @@ go.work.sum
 # .idea/
 # .vscode/
 
-# Cloned build inputs (third_party/ is committed and not listed here)
+# Cloned build inputs (runc is a clone of the fork; see DIT)
 /runc/
 container*
 cni-plugins

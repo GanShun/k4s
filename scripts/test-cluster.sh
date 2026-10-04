@@ -242,15 +242,25 @@ check_marker() {
 	local clean
 	clean=$(mktemp -t k4s-clean.XXXXXX)
 	sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$1" | grep -v '^\$ ' > "$clean" || true
-	if grep -q 'K4S_POD_OK' "$clean"; then
-		echo "pod: ok (container wrote its marker)"
+	if ! grep -q 'K4S_POD_OK' "$clean"; then
+		echo "pod: FAILED (no K4S_POD_OK in the guest log, $1)" >&2
+		tail -50 "$clean" >&2
 		rm -f "$clean"
-		return 0
+		return 1
 	fi
-	echo "pod: FAILED (no K4S_POD_OK in the guest log, $1)" >&2
-	tail -50 "$clean" >&2
+	# The container reports Seccomp: 2 (SECCOMP_MODE_FILTER) only if a filter
+	# is actually installed, so this is the assertion that the cgo-free runc
+	# enforced the profile rather than merely starting the container.
+	if ! grep -qE 'Seccomp:[[:space:]]+2' "$clean"; then
+		echo "seccomp: FAILED (container not running under a seccomp filter)" >&2
+		tail -30 "$clean" >&2
+		rm -f "$clean"
+		return 1
+	fi
+	echo "pod: ok (container wrote its marker)"
+	echo "seccomp: ok (container runs under a filter)"
 	rm -f "$clean"
-	return 1
+	return 0
 }
 
 # --- main -------------------------------------------------------------------

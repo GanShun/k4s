@@ -100,10 +100,12 @@ Five things the node image needed, each found by a distinct failure:
 | `CONFIG_CFS_BANDWIDTH` | there is no `cpu.max` in a cgroup v2 leaf, so `runc create` fails on the pod container |
 | cgroup2 `subtree_control` | the same `cpu.max` failure: u-root's init mounts cgroup2 but enables no controllers |
 
-One deliberate trade-off: **seccomp**. kubelet asks for `RuntimeDefault` on the
-pod sandbox unconditionally, and runc can only enforce seccomp with cgo plus
-libseccomp, so the cgo-free build warns and continues without it. That is a real
-loss of isolation, written up in `docs/nsenter-and-runc.md`.
+**Seccomp is enforced.** kubelet asks for `RuntimeDefault` on the pod sandbox
+unconditionally, and runc can only compile a profile with cgo plus libseccomp,
+so this was a real gap rather than a nicety: a cgo-free runc could not run a pod
+at all. The runc fork now compiles profiles in Go (see
+`docs/nsenter-and-runc.md`), and the smoke pod asserts that the container reports
+`Seccomp: 2`.
 
 Still open from M1: the smoke pod is `hostNetwork: true` because CNI is
 undecided, and the pod is pinned with `nodeName` because the throwaway control

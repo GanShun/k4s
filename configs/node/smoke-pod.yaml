@@ -18,6 +18,12 @@ metadata:
 spec:
   nodeName: k4s-node-1
   hostNetwork: true
+  # Ask for a seccomp profile explicitly rather than relying on the node's
+  # default, so this pod on its own asserts that the cgo-free runc compiles and
+  # installs one.
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
   # Always, not Never: the node is diskless, so a reboot wipes containerd's
   # state and the container kubelet knew about is gone. With Never kubelet
   # settles on ContainerStatusUnknown and does not bring it back; with Always
@@ -26,7 +32,14 @@ spec:
   containers:
     - name: smoke
       image: docker.io/library/busybox:1.36
-      command: ["sh", "-c", "echo K4S_POD_OK > /out/result; sleep 3600"]
+      # "Seccomp: 2" in /proc/self/status is SECCOMP_MODE_FILTER, i.e. the
+      # process is running under a filter. The test asserts it, which is what
+      # makes this an end-to-end check of the seccomp support rather than just
+      # "the pod started".
+      command:
+        - "sh"
+        - "-c"
+        - "exec 2>>/out/result; echo K4S_POD_OK >> /out/result; grep '^Seccomp:' /proc/self/status >> /out/result; sleep 3600"
       volumeMounts:
         - name: out
           mountPath: /out

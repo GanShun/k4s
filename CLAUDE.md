@@ -12,9 +12,10 @@ target is diskless GPU servers for LLM inference.
 
 Component pins are upstream (u-root, containerd, coredns, etcd, flannel,
 kubernetes) built at exact commits. Two components are deliberately **not**
-stock: a local `third_party/runc` fork (pure-Go namespaces) and standalone
-builds of `runc` and `containerd-shim-runc-v2`. Read `docs/roadmap.md` for the
-milestone plan and `docs/nsenter-and-runc.md` for the runc story.
+stock: a fork of `u-root/runc` (pure-Go namespaces *and* pure-Go seccomp) and
+standalone builds of `runc` and `containerd-shim-runc-v2`. Read
+`docs/roadmap.md` for the milestone plan and `docs/nsenter-and-runc.md` for the
+runc story.
 
 ## Commands
 
@@ -96,14 +97,13 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: throwaway control plane + two guest boots |
 | `scripts/cluster-check.sh` | The guest half of that test, piped into gosh |
-| `third_party/runc/` | Fork of `u-root/runc`: pure-Go (cgo-free) namespaces |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/nsenter-and-runc.md` | Why runc normally needs cgo, and the fork |
 | `go.work` | Committed and load-bearing; see below |
 
 Gitignored build inputs (cloned by `DIT`) include `u-root/`, `containerd/`,
-`coredns/`, `etcd/`, `flannel/`, `kubernetes/`, `linux/`, `build/` and
-`initramfs.cpio`. `third_party/` **is** committed.
+`coredns/`, `etcd/`, `flannel/`, `kubernetes/`, `runc/`, `linux/`, `build/` and
+`initramfs.cpio`.
 
 ## DIT: the build
 
@@ -124,7 +124,7 @@ die on "destination path already exists". To move a component, edit its
 | flannel | `0567dde14a09315931e55c3cb77d43f53e0e1db3` (`purego`) |
 | kubernetes | `1c2e10a409eb1b03f2f28f401ce935312e20d9fb` (v1.35.8) |
 | cni-plugins | `257ef09a103e8b8fe91a0fefe8680c01f84b520b` (loopback only) |
-| runc | **not cloned** — `third_party/runc`, fork of `u-root/runc@fc66d646` |
+| runc | `GanShun/runc` @ `1b3411e2` — a fork with a Go namespace path and a Go seccomp compiler |
 
 **2. Tidy.** `go mod tidy` in each module, then a u-root build.
 
@@ -147,8 +147,8 @@ version stamp (`k8s.io/component-base/version.gitVersion=v1.35.8`).
 
 ### go.work is committed and load-bearing
 
-`go.work` lists the cloned modules (`./containerd`, `./flannel`,
-`./third_party/runc`, `./u-root`, `./coredns`, `./etcd/etcdctl`) and carries a
+`go.work` lists the cloned modules (`./containerd`, `./flannel`, `./runc`,
+`./u-root`, `./coredns`, `./etcd/etcdctl`) and carries a
 dependency pin the build relies on. **Do not regenerate it and do not add
 `go work init`.** It is also why the repo has no broken-intermediate state that
 tries to regenerate it: the workspace is authoritative.
@@ -206,20 +206,23 @@ container's own `K4S_CONTAINER_OK` output.
   `git@github.com:` and `--depth 1` on moving branches, so the dependency graph
   changed run to run.
 - **`go.work` committed**, not generated.
-- **`runc` builds cgo-free from `third_party/runc`.** Upstream's `purego` branch
-  only *deletes* the cgo namespace constructor, so its `CGO_ENABLED=0` runc
-  cannot create namespaces (`can't get final child's PID from pipe: EOF`). The
-  fork creates them with Go's `clone(2)` support (`SysProcAttr.Cloneflags`) on
-  the parent side and uses the direct child PID. Rootful containers work; user
+- **`runc` is a fork that builds cgo-free.** Upstream's `purego` branch only
+  *deletes* the cgo namespace constructor, so its `CGO_ENABLED=0` runc cannot
+  create namespaces (`can't get final child's PID from pipe: EOF`). The fork
+  does both cgo-only jobs in Go: it creates the namespaces with Go's `clone(2)`
+  support (`SysProcAttr.Cloneflags`) on the parent side, and it compiles seccomp
+  profiles to BPF instead of calling libseccomp. Rootful containers work; user
   namespaces do not. Details in `docs/nsenter-and-runc.md`.
 - **Standalone, not `bb`**, for anything that re-execs `/proc/self/exe`.
 
 ## Known limitations
 
-- **Seccomp is not enforced.** kubelet asks for `RuntimeDefault` on the pod
-  sandbox unconditionally and runc can only enforce seccomp with cgo +
-  libseccomp, so the cgo-free build warns and runs without it. This is the
-  largest security gap in the pure-Go runtime; see `docs/nsenter-and-runc.md`.
+- **Seccomp is enforced, but the filter is a linear chain.** The fork compiles
+  the profile in Go and installs it, so a `RuntimeDefault` pod really runs under
+  `SECCOMP_MODE_FILTER` (the M1 test asserts it). The chain costs O(rules) per
+  syscall where libseccomp builds a tree and costs O(log n), and architectures
+  x/sys/unix has no table for (x32, the mips n32 ABIs, 31-bit s390) are refused
+  rather than filtered. See `docs/nsenter-and-runc.md`.
 - **Rootless / user namespaces**: not supported. `CLONE_NEWUSER` plus the other
   namespaces in one `clone` returns `EPERM`; nsexec's staged unshare is the
   missing piece. The node runs containers as root, so this does not block it.
@@ -235,8 +238,10 @@ container's own `K4S_CONTAINER_OK` output.
 ## Status
 
 Branch `boot-qemu`. M0 (bootable image + QEMU loop) and **M1 (kubelet joins a
-throwaway cluster, runs a pod, and returns after a reboot)** are done:
-`make test` passes the capability check and runs a container, and
-`make test-cluster` joins, runs the smoke pod, reboots, rejoins and runs it
-again. `docs/roadmap.md` has the M1 findings; M2 (ephemeral hygiene, kill
+throwaway cluster, runs a pod under a seccomp filter, and returns after a
+reboot)** are done: `make test` passes the capability check and runs a
+container, and `make test-cluster` joins, runs the smoke pod (asserting the
+container reports `Seccomp: 2`), reboots, rejoins and runs it again. The image
+uses a cgo-free runc fork that does both cgo-only jobs — namespaces and seccomp
+— in Go. `docs/roadmap.md` has the M1 findings; M2 (ephemeral hygiene, kill
 switch) and M3 (GPU) are next.
