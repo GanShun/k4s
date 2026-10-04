@@ -43,7 +43,7 @@ FLANNEL_REPO=https://github.com/u-root/flannel.git
 FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (pure-Go proxy)
 
 RUNC_REPO=https://github.com/GanShun/runc.git
-RUNC_REF=995a035c7da086aefddee6d6bc34c56d6741b0c1  # purego-seccomp, 2026-10-04
+RUNC_REF=327154a25d10ef7a6aee2a09894a0938253a5ed1  # purego-seccomp, 2026-10-04
 
 KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
 KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8

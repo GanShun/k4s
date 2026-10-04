@@ -222,7 +222,8 @@ container's own `K4S_CONTAINER_OK` output.
   `SECCOMP_MODE_FILTER` (the M1 test asserts it). A syscall costs O(log rules)
   comparisons; `TestSectionIsATree` measures that, because a chain would still be
   correct. Architectures x/sys/unix has no table for (x32, the mips n32 ABIs,
-  31-bit s390) are refused rather than filtered. See `docs/nsenter-and-runc.md`.
+  31-bit s390) are refused rather than filtered, and x32 is the one place the
+  compiler knowingly differs from libseccomp. See `docs/nsenter-and-runc.md`.
 - **Rootless / user namespaces**: not supported. `CLONE_NEWUSER` plus the other
   namespaces in one `clone` returns `EPERM`; nsexec's staged unshare is the
   missing piece. The node runs containers as root, so this does not block it.

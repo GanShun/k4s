@@ -149,7 +149,36 @@ Three details that are easy to get wrong, and that only running it caught:
 - `golang.org/x/net/bpf`'s doc comments describe the jump comparisons the
   **opposite way round** from the encoding, which is what the kernel implements.
   `JumpGreaterOrEqual` means `A >= K`. Two of these tests failed to catch a bug
-  precisely because they were written from the comments.
+  precisely because they were written from the comments;
+- a condition compares the **whole 64-bit argument**, as libseccomp does and as
+  a profile means. Comparing only the low half, which is all one cBPF load
+  reaches, also matches `0x10000002a` against a rule for `42`; for an allow rule
+  that is fail-open. The high half is compared first;
+- a bad architecture returns **`KILL_THREAD`**, not `KILL_PROCESS`. That is what
+  libseccomp does, and the two are not the same filter: killing one thread
+  leaves the rest of a threaded process running.
+
+### Checking against libseccomp
+
+`TestAgainstLibseccomp` is the only test that compares the compiler with an
+implementation other than itself. The model test is written from the same
+reading of the profile semantics as the compiler, so a shared misreading
+satisfies both - which is exactly how the jump-direction bug got through. This
+one builds the filter the cgo build would install (libseccomp, plus the same
+`-ENOSYS` stub) and runs both programs in the interpreter over the same grid:
+about 3100 cases, and every difference it has found so far was a real bug, the
+64-bit one above included.
+
+It needs libseccomp and the `seccomp` build tag, so **`make test` and CI run it
+and a plain `go test ./...` does not**. Locally that means `libseccomp-dev` plus
+`pkg-config`, since `libseccomp-golang` is found through it.
+
+The one thing it cannot check is **x32**. `golang.org/x/sys/unix` carries no x32
+syscall table, so where libseccomp kills an x32 syscall number (a profile that
+does not list `SCMP_ARCH_X32`) or resolves it against its x32 table (one that
+does), this build applies the profile's default action. The test excludes those
+numbers, and nothing else: a profile that does not mention x32 still agrees with
+libseccomp about every number, including `0xffffffff`.
 
 Verified on a node: the guest joins a throwaway apiserver and runs a pod with
 `RuntimeDefault` seccomp, and the container reports `Seccomp: 2`
