@@ -44,14 +44,21 @@ echo "--- guest output (tail) ---"
 tail -40 "$LOG"
 echo "---------------------------"
 
-if ! grep -q "K4S_CHECK_END" "$LOG"; then
+# The guest echoes the script as it runs, so a literal "fail" also appears in
+# the echoed source. Strip ANSI escapes and gosh prompt lines so only real
+# output is inspected.
+CLEAN=$(mktemp -t k4s-clean.XXXXXX)
+sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" | grep -v '^\$ ' > "$CLEAN" || true
+
+if ! grep -q "K4S_CHECK_END" "$CLEAN"; then
 	echo "boot: FAILED (no end marker; qemu rc=$rc, log $LOG)" >&2
 	exit 1
 fi
 echo "boot: ok"
 
-if grep -q "K4S_CHECK:.*: fail" "$LOG"; then
+if grep -qE '^K4S_CHECK:.*: fail' "$CLEAN"; then
 	echo "capabilities: FAILED" >&2
 	exit 1
 fi
 echo "capabilities: ok"
+rm -f "$CLEAN"

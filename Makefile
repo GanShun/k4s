@@ -31,6 +31,11 @@ all: image
 image:
 	./DIT
 
+# run/test depend on the file so they do not rebuild the image every time;
+# `make image` always rebuilds it.
+$(IMAGE): DIT
+	./DIT
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
@@ -45,10 +50,10 @@ kernel: $(KERNEL)
 $(KERNEL): $(BUILD)/.config
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) -j$(NPROC) bzImage
 
-run: kernel image
+run: kernel $(IMAGE)
 	$(QEMU) $(QEMU_ARGS) -nographic
 
-test: kernel image
+test: kernel $(IMAGE)
 	scripts/test-boot.sh $(KERNEL) $(IMAGE)
 
 clean:

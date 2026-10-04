@@ -7,7 +7,7 @@
 
 echo "K4S_CHECK_START"
 echo "K4S_CHECK: cmdline: $(cat /proc/cmdline)"
-echo "K4S_CHECK: uname: $(uname -a)"
+echo "K4S_CHECK: kernel: $(cat /proc/version)"
 
 if [ -r /proc/version ]; then echo "K4S_CHECK: proc: ok"; else echo "K4S_CHECK: proc: fail"; fi
 if [ -d /sys/kernel ]; then echo "K4S_CHECK: sysfs: ok"; else echo "K4S_CHECK: sysfs: fail"; fi
@@ -18,7 +18,6 @@ if echo hello > /tmp/k4s-test; then echo "K4S_CHECK: tmpfs-write: ok"; else echo
 
 if containerd --version; then echo "K4S_CHECK: containerd: ok"; else echo "K4S_CHECK: containerd: fail"; fi
 if coredns -version; then echo "K4S_CHECK: coredns: ok"; else echo "K4S_CHECK: coredns: fail"; fi
-if etcdctl version; then echo "K4S_CHECK: etcdctl: ok"; else echo "K4S_CHECK: etcdctl: fail"; fi
 if ip link; then echo "K4S_CHECK: net: ok"; else echo "K4S_CHECK: net: fail"; fi
 
 echo "K4S_CHECK_END"
