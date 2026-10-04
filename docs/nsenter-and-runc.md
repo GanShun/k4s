@@ -166,19 +166,29 @@ reading of the profile semantics as the compiler, so a shared misreading
 satisfies both - which is exactly how the jump-direction bug got through. This
 one builds the filter the cgo build would install (libseccomp, plus the same
 `-ENOSYS` stub) and runs both programs in the interpreter over the same grid:
-about 3100 cases, and every difference it has found so far was a real bug, the
+about 4300 cases, and every difference it has found so far was a real bug, the
 64-bit one above included.
 
 It needs libseccomp and the `seccomp` build tag, so **`make test` and CI run it
 and a plain `go test ./...` does not**. Locally that means `libseccomp-dev` plus
 `pkg-config`, since `libseccomp-golang` is found through it.
 
-The one thing it cannot check is **x32**. `golang.org/x/sys/unix` carries no x32
-syscall table, so where libseccomp kills an x32 syscall number (a profile that
-does not list `SCMP_ARCH_X32`) or resolves it against its x32 table (one that
-does), this build applies the profile's default action. The test excludes those
-numbers, and nothing else: a profile that does not mention x32 still agrees with
-libseccomp about every number, including `0xffffffff`.
+The one thing it cannot check is **x32**, the ILP32 ABI on x86-64. An x32
+syscall signals itself with bit 30 of the syscall number rather than through
+`seccomp_data.arch`, which is `AUDIT_ARCH_X86_64` for both ABIs, and
+`golang.org/x/sys/unix` carries no x32 table. So x32 numbers are **refused**
+(`KILL_THREAD`), which is what libseccomp does when a profile does not list
+`SCMP_ARCH_X32`. A profile that does list it has those numbers filtered through
+libseccomp's x32 table, which this build cannot do and so refuses as well.
+`0xffffffff` is not a syscall and takes the ordinary path in both. The test
+excludes x32 numbers only for profiles that list x32; there is nothing else it
+cannot check.
+
+Before that guard existed, x32 numbers fell through to the profile's default
+action, which for a permissive profile meant allowing a syscall libseccomp
+kills. The kernel here does not implement the ABI (`CONFIG_X86_X32_ABI` is off),
+so it was never reachable in practice -- but it was reachable on a kernel that
+does, and the differential test is what found it.
 
 Verified on a node: the guest joins a throwaway apiserver and runs a pod with
 `RuntimeDefault` seccomp, and the container reports `Seccomp: 2`
