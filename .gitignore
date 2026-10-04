@@ -31,6 +31,7 @@ go.work.sum
 # .vscode/
 
 # Cloned build inputs (third_party/ is committed and not listed here)
+/runc/
 container*
 cni-plugins
 u-root
