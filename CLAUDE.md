@@ -50,19 +50,17 @@ Two prerequisites are **not** built by `make`:
 
 ## Commits
 
-**Sign off every commit** (`git commit -s`) as `Gan Shun Lim
-<ganshun@gmail.com>`, with the author set to the same identity. Both upstream
-projects use the DCO and `GanShun/runc` enforces it
-(`web_commit_signoff_required: true`), so a commit whose `Signed-off-by:` trailer
-is missing or does not match the author has to be rewritten before it can land.
+**Sign off every commit** (`git commit -s`), with the `Signed-off-by:` trailer
+matching the commit's author. Both upstream projects use the DCO, and the runc
+fork is configured to require it (`web_commit_signoff_required: true`), so a
+commit whose trailer is missing, or does not match the author, has to be
+rewritten before it can land.
 
-Both checkouts are already configured with that identity (`git config
-user.name` → `Gan Shun Lim`, `git config user.email` → `ganshun@gmail.com`); if
-you commit from somewhere else, set it first:
+The trailer is taken from git config, so set that once (globally, or per
+checkout) and `-s` will produce the right one. Confirm it before committing:
 
 ```
-git config user.name  "Gan Shun Lim"
-git config user.email "ganshun@gmail.com"
+git config user.name && git config user.email
 ```
 
 Git has **no config that adds a commit sign-off automatically** —
@@ -76,11 +74,12 @@ git commit --amend --no-edit -s    # add it to the commit just made
 
 `-s` does not duplicate a trailer that is already there. To add sign-offs to
 existing commits (our earlier history was retrofitted this way), rewrite only
-our own range so upstream commits keep their SHAs:
+our own range so upstream commits keep their SHAs, and let the filter read the
+identity from git config rather than hardcoding it:
 
 ```
 FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f \
-  --msg-filter 'cat; printf "\nSigned-off-by: Gan Shun Lim <ganshun@gmail.com>\n"' \
+  --msg-filter 'cat; printf "\nSigned-off-by: %s <%s>\n" "$(git config user.name)" "$(git config user.email)"' \
   -- origin/main..boot-qemu
 git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-ref -d
 ```
