@@ -2,23 +2,49 @@
 #
 # Capability check run inside the k4s initramfs over the serial console.
 #
-# gosh executes this from stdin, so keep it POSIX and simple. Each line prints
-# a "K4S_CHECK: <name>: ok|fail" marker; test-boot.sh greps for these.
+# The guest console is a tty, so u-root's gosh runs interactively and executes
+# this one line at a time. Every line must be a complete command: no multi-line
+# if/for blocks, and keep lines short enough not to wrap.
 
 echo "K4S_CHECK_START"
-echo "K4S_CHECK: cmdline: $(cat /proc/cmdline)"
 echo "K4S_CHECK: kernel: $(cat /proc/version)"
 
-if [ -r /proc/version ]; then echo "K4S_CHECK: proc: ok"; else echo "K4S_CHECK: proc: fail"; fi
-if [ -d /sys/kernel ]; then echo "K4S_CHECK: sysfs: ok"; else echo "K4S_CHECK: sysfs: fail"; fi
-if [ -e /dev/null ]; then echo "K4S_CHECK: devtmpfs: ok"; else echo "K4S_CHECK: devtmpfs: fail"; fi
+test -r /proc/version && echo "K4S_CHECK: proc: ok" || echo "K4S_CHECK: proc: fail"
+test -d /sys/kernel && echo "K4S_CHECK: sysfs: ok" || echo "K4S_CHECK: sysfs: fail"
+test -e /dev/null && echo "K4S_CHECK: devtmpfs: ok" || echo "K4S_CHECK: devtmpfs: fail"
 
-if mount -t tmpfs tmpfs /tmp; then echo "K4S_CHECK: tmpfs: ok"; else echo "K4S_CHECK: tmpfs: fail"; fi
-if echo hello > /tmp/k4s-test; then echo "K4S_CHECK: tmpfs-write: ok"; else echo "K4S_CHECK: tmpfs-write: fail"; fi
+mkdir -p /tmp/k4s
+mount -t tmpfs tmpfs /tmp/k4s
+echo hello > /tmp/k4s/test && echo "K4S_CHECK: tmpfs: ok" || echo "K4S_CHECK: tmpfs: fail"
 
-if containerd --version; then echo "K4S_CHECK: containerd: ok"; else echo "K4S_CHECK: containerd: fail"; fi
-if coredns -version; then echo "K4S_CHECK: coredns: ok"; else echo "K4S_CHECK: coredns: fail"; fi
-if ip link; then echo "K4S_CHECK: net: ok"; else echo "K4S_CHECK: net: fail"; fi
+containerd --version && echo "K4S_CHECK: containerd: ok" || echo "K4S_CHECK: containerd: fail"
+coredns -version && echo "K4S_CHECK: coredns: ok" || echo "K4S_CHECK: coredns: fail"
+ip link >/dev/null && echo "K4S_CHECK: net: ok" || echo "K4S_CHECK: net: fail"
+
+# runc and containerd want a cgroup2 hierarchy; u-root's init leaves none.
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 none /sys/fs/cgroup
+test -e /sys/fs/cgroup/cgroup.controllers && echo "K4S_CHECK: cgroup2: ok" || echo "K4S_CHECK: cgroup2: fail"
+
+# containerd's state wants a writable, xattr-capable filesystem; ramfs is not.
+mkdir -p /var/lib/containerd /run/containerd
+mount -t tmpfs tmpfs /var/lib/containerd
+containerd </dev/null >/tmp/containerd.log 2>&1 &
+sleep 5
+ctr version >/dev/null 2>&1 && echo "K4S_CHECK: ctr: ok" || echo "K4S_CHECK: ctr: fail"
+
+containerd-shim-runc-v2 -v >/dev/null 2>&1 && echo "K4S_CHECK: shim: ok" || echo "K4S_CHECK: shim: fail"
+
+# No image needed: bb is static, so a copy plus one symlink gives the
+# container an /bin/echo.
+mkdir -p /run/rootfs/bin
+cp /bbin/bb /run/rootfs/bin/bb
+ln -s bb /run/rootfs/bin/echo
+ctr run --rm --rootfs /run/rootfs k4stest /bin/echo K4S_CONTAINER_OK </dev/null
+echo "K4S_CHECK: container: done"
+
+echo "--- containerd log tail ---"
+tail -n 30 /tmp/containerd.log
 
 echo "K4S_CHECK_END"
 poweroff

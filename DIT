@@ -42,8 +42,8 @@ ETCD_REF=0bd70ca863d9f36c2776ef7f38cd35f12cca8d4a       # main, 2026-05-01
 FLANNEL_REPO=https://github.com/u-root/flannel.git
 FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (pure-Go proxy)
 
-RUNC_REPO=https://github.com/u-root/runc.git
-RUNC_REF=fc66d646733b11c77772d251a6cb542df8698c06        # purego, 2026-05-01
+# runc is not cloned: third_party/runc is a fork of u-root/runc@fc66d646 (the
+# purego branch) carrying the pure-Go namespace path. See third_party/README.md.
 
 # --- fetch ------------------------------------------------------------------
 # Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
@@ -69,21 +69,40 @@ clone_pinned containerd "$CONTAINERD_REPO" "$CONTAINERD_REF"
 clone_pinned coredns    "$COREDNS_REPO"    "$COREDNS_REF"
 clone_pinned etcd       "$ETCD_REPO"       "$ETCD_REF"
 clone_pinned flannel    "$FLANNEL_REPO"    "$FLANNEL_REF"
-clone_pinned runc       "$RUNC_REPO"       "$RUNC_REF"
 
 # --- tidy -------------------------------------------------------------------
 (cd containerd && go mod tidy)
 (cd coredns && go mod tidy)
 (cd etcd/etcdctl && go mod tidy)
 (cd flannel && go mod tidy)
-(cd runc && go mod tidy)
 (cd u-root && go mod tidy && env -u GOARCH -u GOOS go build)
+
+# Two components cannot be folded into the bb busybox because they re-exec
+# /proc/self/exe (or os.Executable()): under a multiplexer that resolves to the
+# bb binary itself, and bb dispatches on argv[0], so the child cannot find its
+# applet and dies.
+#   * containerd-shim-runc-v2 spawns its long-running daemon that way
+#   * runc spawns the container init that way (exec.Command(exePath, "init"))
+# Both are built as standalone binaries and added with -files.
+#
+# runc is built from third_party/runc, a fork of u-root/runc whose !cgo path
+# creates the container namespaces with Go's own clone(2) support instead of
+# the C nsexec constructor, so it builds with CGO_ENABLED=0. See
+# docs/nsenter-and-runc.md. This covers rootful containers; user namespaces
+# need the staged unshare that nsexec implements and are not handled yet.
+mkdir -p build
+(cd containerd && CGO_ENABLED=0 env -u GOARCH -u GOOS go build \
+	-o ../build/containerd-shim-runc-v2 ./cmd/containerd-shim-runc-v2)
+(cd third_party/runc && CGO_ENABLED=0 env -u GOARCH -u GOOS go build \
+	-o ../../build/runc .)
 
 # --- assemble ---------------------------------------------------------------
 ./u-root/u-root -o initramfs.cpio \
+	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \
+	-files build/runc:bin/runc \
 	u-root/cmds/core/* \
-	runc/ \
 	./containerd/cmd/containerd \
+	./containerd/cmd/ctr \
 	./flannel \
 	./coredns \
 	./etcd/etcdctl

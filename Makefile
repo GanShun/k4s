@@ -22,7 +22,7 @@ QEMU       := qemu-system-x86_64
 QEMU_ACCEL := $(shell [ -w /dev/kvm ] && echo "-enable-kvm -cpu host")
 QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
               -kernel $(KERNEL) -initrd $(IMAGE) \
-              -append "console=ttyS0,115200 panic=-1" -no-reboot
+              -append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" -no-reboot
 
 .PHONY: all image kernel run test clean distclean
 

@@ -29,7 +29,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-runc
+
+# Cloned build inputs (third_party/ is committed and not listed here)
 container*
 u-root
 kubernetes

@@ -34,7 +34,7 @@ set +e
 timeout "$K4S_BOOT_TIMEOUT" qemu-system-x86_64 \
 	-M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
 	-kernel "$KERNEL" -initrd "$IMAGE" \
-	-append "console=ttyS0,115200 panic=-1" \
+	-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
 	-nographic -no-reboot \
 	< "$CHECK" > "$LOG" 2>&1
 rc=$?
@@ -61,4 +61,11 @@ if grep -qE '^K4S_CHECK:.*: fail' "$CLEAN"; then
 	exit 1
 fi
 echo "capabilities: ok"
+
+# The container's own output is the proof it actually ran.
+if ! grep -q "K4S_CONTAINER_OK" "$CLEAN"; then
+	echo "container: FAILED (marker not seen)" >&2
+	exit 1
+fi
+echo "container: ok"
 rm -f "$CLEAN"
