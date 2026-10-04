@@ -37,3 +37,7 @@ flannel
 initram*cpio
 coredns
 etcd
+
+# Kernel source checkout (kept out of the repo) and kernel build output
+/linux/
+/build/
