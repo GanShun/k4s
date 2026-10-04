@@ -32,6 +32,7 @@ go.work.sum
 runc
 container*
 u-root
+kubernetes
 flannel
 initram*cpio
 coredns
