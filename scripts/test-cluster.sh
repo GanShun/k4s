@@ -39,9 +39,11 @@ BASE=${2:-initramfs.cpio}
 
 CP=build/controlplane
 PKI=$CP/pki
+SSH=$CP/ssh
 NODEDIR=$CP/node
 NODE=k4s-node-1
 PORT=6443
+SSH_PORT=${K4S_SSH_PORT:-2222}
 APISERVER="https://127.0.0.1:$PORT"
 SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
@@ -118,6 +120,22 @@ build_control_plane() {
 		(cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
 			-ldflags "-s -w" -o "../build/controlplane/$b" "./cmd/$b")
 	done
+}
+
+# A throwaway key so the harness can read files out of the guest over ssh
+# instead of scraping them off the serial console. u-root's sshd takes its host
+# key and its authorized_keys as paths, so both are spliced into the node image
+# and generated per run, never committed, exactly like the PKI above.
+gen_ssh_keys() {
+	if [ -s "$SSH/client" ] && [ -s "$SSH/authorized_keys" ]; then
+		return 0
+	fi
+	log "generating a throwaway ssh key"
+	rm -rf "$SSH"
+	mkdir -p "$SSH"
+	ssh-keygen -q -t rsa -b 2048 -N '' -f "$SSH/host_rsa" >/dev/null
+	ssh-keygen -q -t rsa -b 2048 -N '' -f "$SSH/client" >/dev/null
+	cp "$SSH/client.pub" "$SSH/authorized_keys"
 }
 
 gen_pki() {
@@ -380,9 +398,23 @@ build_cilium() {
 
 # --- node image -------------------------------------------------------------
 splice_image() {
-	log "splicing the node kubeconfig into $NODE_IMAGE"
+	# Cilium writes this conflist itself, once its agent is ready -- but the CRI
+	# reads the config directory once, at startup, which is before that. An empty
+	# directory is ErrCNINotInitialized; a directory with flannel's conflist in
+	# it makes containerd cache the flannel plugin, and then every sandbox fails
+	# with "failed to load flannel 'subnet.env'", which is what this cost us. So
+	# put the same conflist Cilium will write there up front; the agent rewrites
+	# it identically when it becomes ready.
+	local extra=()
+	if [ "$CNI" = cilium ]; then
+		extra=(-files "$CONFIGS/05-cilium.conflist:etc/cni/net.d/05-cilium.conflist")
+	fi
+	log "splicing the node kubeconfig, ssh keys and CNI config into $NODE_IMAGE"
 	./u-root/u-root -base "$BASE" -nocmd \
 		-files "$NODEDIR/kubeconfig:etc/kubernetes/kubeconfig" \
+		-files "$SSH/authorized_keys:etc/ssh/authorized_keys" \
+		-files "$SSH/host_rsa:etc/ssh/host_rsa" \
+		"${extra[@]}" \
 		-initcmd="" -defaultsh="" -o "$NODE_IMAGE" >/dev/null
 }
 
@@ -395,20 +427,23 @@ boot() {
 		# Cilium's DaemonSet mounts /lib/modules unconditionally, and this image
 		# has no modules and so no such directory.
 		#
-		# The flannel conflist is deliberately left in place. Cilium runs with
-		# --cni-exclusive=true and removes non-Cilium conflists itself once it has
-		# written its own, and until then 05-cilium sorts ahead of 10-flannel, so
-		# Cilium wins either way. Deleting it here instead empties the directory
-		# before containerd starts, and the CRI loads that directory once: a
-		# directory with no conflist in it is ErrCNINotInitialized, so every
-		# sandbox gets created with no network -- no address, no CNI call, and
-		# nothing in containerd's log to say why.
+		# Cilium's conflist has to be the only one on disk before containerd
+		# starts, because the CRI reads that directory once and then uses what it
+		# cached. Leaving flannel's there means containerd caches the flannel
+		# plugin and every sandbox fails with "failed to load flannel
+		# 'subnet.env'", which is exactly what happened. The Cilium conflist is
+		# spliced into the image for the same reason: deleting flannel's and
+		# waiting for Cilium to write its own leaves the directory empty when
+		# containerd looks, and a directory with no conflist in it is
+		# ErrCNINotInitialized, which is the same failure one step earlier.
 		if [ "$CNI" = cilium ]; then
 			printf 'mkdir -p /lib/modules\n'
+			printf 'rm -f /etc/cni/net.d/10-flannel.conflist\n'
 		fi
 		cat "$GUEST"
 	} | feed_guest "$CP/qemu.pid" | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
-			-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+			-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
+			-device virtio-net-pci,netdev=n0 \
 			-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
 			-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
 			-nographic -no-reboot > "$CP/boot$n.log" 2>&1 &
@@ -472,6 +507,61 @@ wait_qemu() {
 # its own config -- Cilium does -- the node cannot become Ready until that has
 # happened, so waiting for Ready before applying the CNI is a deadlock: nothing
 # would ever run the DaemonSet that makes the node Ready.
+# Read files out of the guest over ssh. This is the whole reason sshd is in the
+# image: the serial console cannot be trusted with bulk output, a file that is
+# read does not have to be printed at the right moment to be caught, and catting
+# a log to a 115200-baud line takes minutes.
+guest_get() {
+	ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=5 -i "$SSH/client" \
+		-p "$SSH_PORT" root@127.0.0.1 "$@" 2>&1 || true
+}
+
+wait_ssh() {
+	local i
+	for i in $(seq 1 45); do
+		if guest_get true >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+# Everything worth knowing about a failed run, read out of the guest over ssh
+# while it is still alive. This is what sshd is in the image for. The serial
+# console cannot do this job: a log has to be printed at exactly the right
+# moment to be caught, catting one to a 115200-baud line takes minutes, and
+# handing the console too much at once corrupts the guest's own script. A file
+# that is read does not have to be printed at any particular moment at all.
+diag() {
+	local d=$CP/diag m
+	mkdir -p "$d"
+	echo "  --- markers ---" >&2
+	for m in smoke netns ds deploy; do
+		printf '  %-7s %s\n' "$m" \
+			"$(guest_get "cat /var/log/k4s-$m/result 2>/dev/null" | tr '\n' ' ')" >&2
+	done
+	echo "  --- cni on disk ---" >&2
+	guest_get 'ls /etc/cni/net.d; ls /opt/cni/bin' | sed 's/^/  /' >&2
+	echo "  --- cilium-cni plugin log ---" >&2
+	guest_get 'cat /var/run/cilium/cilium-cni.log 2>&1 | tail -n 15' | sed 's/^/  /' >&2
+	echo "  --- kubelet, the netns pod ---" >&2
+	guest_get 'grep k4s-netns /tmp/kubelet.log | tail -n 10' | sed 's/^/  /' >&2
+	echo "  --- kubelet, last 12 ---" >&2
+	guest_get 'tail -n 12 /tmp/kubelet.log' | sed 's/^/  /' >&2
+	echo "  --- containerd, cni ---" >&2
+	guest_get 'grep -iE "cni|sandbox" /tmp/containerd.log | tail -n 10' | sed 's/^/  /' >&2
+	echo "  --- the agent, errors ---" >&2
+	guest_get 'grep -E "level=(error|fatal)" /var/log/pods/*cilium-*/cilium-agent/*.log | tail -n 12' | sed 's/^/  /' >&2
+	# Keep the full logs for a second look, rather than printing them.
+	for m in kubelet.log containerd.log sshd.log; do
+		guest_get "cat /tmp/$m" > "$d/$m" 2>/dev/null || true
+	done
+	guest_get 'cat /var/log/pods/*cilium-*/cilium-agent/*.log' > "$d/cilium-agent.log" 2>/dev/null || true
+	echo "  (full logs kept in $d)" >&2
+}
+
 wait_node_exists() {
 	local i
 	for i in $(seq 1 90); do
@@ -494,9 +584,18 @@ wait_node() {
 	return 1
 }
 
+# Delete a workload before applying it. With K4S_KEEP_CP the control plane is
+# reused, so the objects survive from the last run along with their statuses: a
+# stale "Running" makes the checks below pass or fail instantly and for the wrong
+# reason, and a stale pod IP is not this run's pod IP.
+reapply() {
+	K delete -f "$1" --ignore-not-found >/dev/null 2>&1 || true
+	K apply -f "$1" >/dev/null
+}
+
 run_pod() {
 	log "applying the smoke pod"
-	K apply -f "$POD" >/dev/null
+	reapply "$POD"
 	local i ph
 	for i in $(seq 1 90); do
 		ph=$(K get pod k4s-smoke -o jsonpath='{.status.phase}' 2>/dev/null || true)
@@ -517,23 +616,25 @@ run_pod() {
 # view of the address here, and the container's own view of eth0 in check_marker.
 run_netns_pod() {
 	log "applying the pod that needs a CNI"
-	K apply -f "$NETNS_POD" >/dev/null
+	reapply "$NETNS_POD"
 	local i ph ip
 	for i in $(seq 1 90); do
 		ph=$(K get pod k4s-netns -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		if [ "$ph" = Running ]; then
 			ip=$(K get pod k4s-netns -o jsonpath='{.status.podIP}' 2>/dev/null || true)
 			if [[ "$ip" == 10.244.* ]]; then
-				echo "pod IP: $ip (from the flannel subnet)"
+				echo "pod IP: $ip (from the node's pod CIDR)"
 				return 0
 			fi
 			echo "netns pod: FAILED (Running, but its address is ${ip:-<none>}, not from 10.244.0.0/16)" >&2
+			diag
 			return 1
 		fi
 		sleep 2
 	done
 	echo "netns pod: FAILED (never reached Running)" >&2
 	K describe pod k4s-netns 2>&1 | tail -25 | sed 's/^/  /' >&2
+	diag
 	return 1
 }
 
@@ -585,18 +686,12 @@ run_cilium() {
 			case "$waiting" in
 			*CrashLoopBackOff*|*ImagePullBackOff*|*ErrImagePull*|*CreateContainerError*|*RunContainerError*)
 			echo "cilium: FAILED (agent $waiting) after $((i * 2))s" >&2
-			# Let the guest finish printing before the trap kills it: the
-			# interesting diagnostics are on the node, not here. Polled, so a
-			# guest that is already done costs nothing.
-			local g
-			for g in $(seq 1 30); do
-				grep -qa 'K4S_CHECK_END' "$CP/boot1.log" && break
-				sleep 2
-			done
+			# Read the node's side of the story over ssh while it is still up.
+			diag
 			K get pods -n kube-system -o wide 2>&1 | sed 's/^/  /' >&2
-				K describe pod -n kube-system -l k8s-app=cilium 2>&1 | tail -25 | sed 's/^/  /' >&2
-				return 1
-				;;
+			K describe pod -n kube-system -l k8s-app=cilium 2>&1 | tail -25 | sed 's/^/  /' >&2
+			return 1
+			;;
 			esac
 		fi
 		lastwaiting=$waiting
@@ -664,9 +759,9 @@ run_log_pod() {
 # scheduler.
 run_workloads() {
 	log "applying a DaemonSet and a Deployment"
-	K apply -f "$DS" >/dev/null
-	K apply -f "$DEPLOY" >/dev/null
-	K apply -f "$LOGPOD" >/dev/null
+	reapply "$DS"
+	reapply "$DEPLOY"
+	reapply "$LOGPOD"
 	local i ds deploy
 	for i in $(seq 1 120); do
 		ds=$(K get daemonset k4s-ds -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
@@ -743,6 +838,7 @@ check_marker() {
 
 build_control_plane
 gen_pki
+gen_ssh_keys
 build_controlplane_image
 build_cilium
 cp_up
@@ -761,6 +857,9 @@ if ! wait_node_exists; then
 	exit 1
 fi
 echo "node: ok (registered)"
+# The guest's sshd comes up early, and every diagnostic from here on reads the
+# node over ssh rather than off the console.
+wait_ssh || echo "warning: the guest's sshd did not come up" >&2
 # The CNI goes on before waiting for Ready, not after: Cilium installs its own
 # CNI config, so the node stays NotReady (NetworkReady=false) until the agent is
 # running, and the agent is a DaemonSet that only exists once the node does.

@@ -328,6 +328,48 @@ Cilium's datapath:
    the OOM killer, so this is a memory or rlimit matter inside the agent
    container rather than a kernel feature. It has not been chased yet.
 
+10. **The CRI was using flannel, not Cilium, and it was caching the choice.** With
+    the conflist and BPF blockers cleared, pods still got no address, and the
+    kubelet said why:
+
+    ```
+    failed to setup network for sandbox "...": plugin type="flannel" failed (add):
+      failed to load flannel 'subnet.env' file:
+      open /run/flannel/subnet.env: no such file or directory
+    ```
+
+    The CRI reads `/etc/cni/net.d` **once**, at startup, and uses what it cached.
+    At that moment the only conflist on disk was flannel's -- Cilium writes its
+    own only once its agent is ready, which is later -- so containerd cached the
+    flannel plugin and never looked again. Leaving flannel's conflist in place to
+    keep the directory non-empty (a reasonable-sounding fix, since a directory
+    with *no* conflist is `ErrCNINotInitialized`) is what caused this.
+
+    The fix is to put the conflist Cilium will write there before containerd
+    starts: the harness splices `configs/node/05-cilium.conflist` into the node
+    image and removes flannel's, so the directory contains exactly the right
+    plugin at the moment the CRI reads it. The agent rewrites the same file
+    identically when it becomes ready. With that, `make test-cluster` passes with
+    Cilium as the node's CNI: the agent runs, the node is Ready, a pod that asks
+    for its own network namespace gets an address, and the DaemonSet and
+    Deployment checks pass.
+
+### Read the node over ssh, not over the serial console
+
+Every one of the failures above was made much harder to find than it needed to
+be, and the reason was the diagnostics rather than the bug. The harness fed the
+guest its script through the serial console, and three separate things follow
+from that: the console drops characters when handed a lot at once (which was
+corrupting the script and stopping the guest partway, silently), printing a log
+takes minutes at 115200 baud, and a log has to be printed at exactly the right
+moment to be caught at all.
+
+u-root ships an `sshd`, so the node now runs it: the harness generates a
+throwaway key per run, splices it in beside the kubeconfig, forwards a host port
+to the guest, and reads files out of the node directly. That turned a
+twenty-minute guess into a one-second `cat`, and the answer to blocker 10 was in
+the first file it read.
+
 What is *not* the problem, having checked: image pulls are fast (Cilium's image
 came in 9 seconds), seccomp (the chart marks the agent Unconfined, and the
 operator runs under `RuntimeDefault` without trouble), memory (6 GB was plenty),
