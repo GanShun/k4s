@@ -291,13 +291,20 @@ cp_down() {
 # room. It also holds stdin open until the VM is gone, because gosh treats a
 # closed stdin as end of script.
 feed_guest() {
-	local pidfile=$1 line
+	local pidfile=$1 line waited=0
 	while IFS= read -r line; do
 		printf '%s\n' "$line"
 		sleep 0.05
 	done
+	# Bounded. This is the middle of a pipeline that is backgrounded, and the
+	# guest does not power itself off -- the harness kills the VM -- so if that
+	# ever fails to happen this subshell would sit here forever holding the
+	# caller's stdout open. That is what made a fully successful run report as a
+	# timeout: the harness had printed cluster: ok and exited.
 	while [ ! -s "$pidfile" ] || kill -0 "$(cat "$pidfile")" 2>/dev/null; do
 		sleep 1
+		waited=$((waited + 1))
+		[ "$waited" -lt 300 ] || break
 	done
 }
 
