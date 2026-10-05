@@ -60,7 +60,8 @@ UEFI PXE
 - Networking: CNI is undecided. Cilium for prod parity eventually; the first
   bring-up only needs registration and a pod. The node works today with nothing
   but the loopback plugin, but only for `hostNetwork` pods — see the networking
-  baseline under M1.
+  baseline under M1. Cilium has been evaluated against this node, and the cost is
+  mostly kernel: `docs/cilium.md`.
 - Kill path (M2): watchdog plus an out-of-band power switch, per the intrusic
   threat model.
 

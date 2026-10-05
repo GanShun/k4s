@@ -14,8 +14,8 @@ Component pins are upstream (u-root, containerd, coredns, etcd, flannel,
 kubernetes) built at exact commits. Two components are deliberately **not**
 stock: a fork of `u-root/runc` (pure-Go namespaces *and* pure-Go seccomp) and
 standalone builds of `runc` and `containerd-shim-runc-v2`. Read
-`docs/roadmap.md` for the milestone plan and `docs/nsenter-and-runc.md` for the
-runc story.
+`docs/roadmap.md` for the milestone plan, `docs/nsenter-and-runc.md` for the
+runc story, and `docs/cilium.md` for what choosing Cilium as the CNI would cost.
 
 ## Commands
 
@@ -99,6 +99,7 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `scripts/cluster-check.sh` | The guest half of that test, piped into gosh |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/nsenter-and-runc.md` | Why runc normally needs cgo, and the fork |
+| `docs/cilium.md` | Evaluating Cilium as the CNI: what the node lacks, and why the cost is mostly kernel |
 | `go.work` | Committed and load-bearing; see below |
 
 Gitignored build inputs (cloned by `DIT`) include `u-root/`, `containerd/`,
@@ -226,7 +227,8 @@ container's own `K4S_CONTAINER_OK` output.
   with its own netns cannot start (`failed to find network info for sandbox`).
   The conflist is load-bearing even so — the CRI will not report `NetworkReady`
   with an empty `/etc/cni/net.d`. The "networking baseline" section of
-  `docs/roadmap.md` has the mechanics.
+  `docs/roadmap.md` has the mechanics, and `docs/cilium.md` prices what a real
+  CNI would need.
 - **Seccomp is enforced, and the rules are a search tree.** The fork compiles
   the profile in Go and installs it, so a `RuntimeDefault` pod really runs under
   `SECCOMP_MODE_FILTER` (the M1 test asserts it). A syscall costs O(log rules)
