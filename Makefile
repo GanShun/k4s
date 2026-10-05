@@ -15,10 +15,16 @@
 # that one kernel can run either CNI. It costs about 1.5 MiB of bzImage and a
 # build-time dependency on pahole (see check-pahole).
 #
-# The kernel is checked out at linux/ (gitignored, cloned separately).
+# The kernel is checked out at linux/ (gitignored). `make linux` clones it; see
+# that target for why it is not left as a manual prerequisite.
 
 NPROC      := $(shell nproc)
 LINUX      := linux
+# Pinned like every other component: HTTPS at an exact revision, resolved from a
+# tag that the clone then verifies, so a moved tag fails loudly instead of
+# silently building something else.
+LINUX_TAG  := v7.2
+LINUX_REF  := 8d3ae59288f1e7d58d76558a6ee96d533bc5019f
 BUILD      := build/kernel
 ABS_BUILD  := $(abspath $(BUILD))
 KERNEL     := $(BUILD)/arch/x86/boot/bzImage
@@ -38,7 +44,7 @@ QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
               -kernel $(KERNEL) -initrd $(IMAGE) \
               -append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" -no-reboot
 
-.PHONY: all image kernel run test test-cluster test-cluster-cni test-all \
+.PHONY: all linux image kernel run test test-cluster test-cluster-cni test-all \
         check-pahole clean distclean
 
 all: image
@@ -74,7 +80,16 @@ $(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) check-pahole | $(BUILD)
 	cat $(FRAGMENT) $(CNI_FRAGMENT) >> $(BUILD)/.config
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) olddefconfig
 
-kernel: $(KERNEL)
+# A fresh checkout has no kernel, and the first `make kernel` fails with a
+# kconfig error from inside the kernel's own build that does not say "clone me".
+# Every other component is cloned by DIT, so clone this one too and make it a
+# prerequisite of kernel -- a checkout plus `make test-all` should be the whole
+# story. Depth 1, because a full Linux history is gigabytes and nothing here
+# needs it.
+linux:
+	@scripts/clone-linux.sh $(LINUX_TAG) $(LINUX_REF) $(LINUX)
+
+kernel: linux $(KERNEL)
 
 $(KERNEL): $(BUILD)/.config
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) -j$(NPROC) bzImage
