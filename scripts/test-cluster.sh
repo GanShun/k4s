@@ -51,6 +51,7 @@ SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
 CP_IMAGE=$CP/controlplane-image.cpio
 CP_GUEST=$(dirname "$0")/controlplane-boot.sh
+GUEST=$(dirname "$0")/cluster-check.sh
 CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
 NETNS_POD=$CONFIGS/netns-pod.yaml
@@ -79,17 +80,41 @@ ACCEL=()
 mkdir -p "$CP" "$NODEDIR"
 
 # One instance at a time. Two would fight over the port forward and over the
-# node VM's console log. Not a lock file: an flock fd is inherited by every
-# child, including the node VM -- so the lock outlived the run and the next one
-# could never start. A pid file with a liveness check cannot go stale like that.
-if [ -f "$CP/run.pid" ]; then
-	oldpid=$(cat "$CP/run.pid" 2>/dev/null || true)
+# node VM's console log -- worse, each one's cp_down kills any control plane VM it
+# finds, so a second harness silently destroys the first one's control plane and
+# the node never registers.
+#
+# Not a lock file: an flock fd is inherited by every child, including the node
+# VM, so the lock outlived the run and the next one could never start. A pid file
+# with a liveness check cannot go stale like that.
+#
+# Deliberately NOT under $CP. That directory is where the run's own pids live and
+# is exactly what gets cleaned up with a glob, and `rm -f build/controlplane/*.pid`
+# took this file with it -- which is how twelve harnesses ended up running at
+# once, each killing the others' control planes.
+LOCK=$CP/../k4s-test.pid
+if [ -f "$LOCK" ]; then
+	oldpid=$(cat "$LOCK" 2>/dev/null || true)
 	if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
 		echo "another test-cluster.sh is already running (pid $oldpid)" >&2
+		echo "if it is not, remove $LOCK" >&2
 		exit 1
 	fi
 fi
-echo $$ > "$CP/run.pid"
+echo $$ > "$LOCK"
+
+# Refuse to start if either port is already taken. A stray VM from an earlier
+# probe or a forgotten run holds the port forward, so this run's node VM cannot
+# bind it -- and then the harness talks over ssh to the *other* machine and reads
+# a filesystem belonging to a different boot. That is not hypothetical: it
+# produced several rounds of confident, wrong conclusions from another node's
+# /tmp, including a whole theory about kubelet never starting.
+for p in "$PORT" "$SSH_PORT"; do
+	if ss -ltn 2>/dev/null | grep -q ":$p "; then
+		echo "port $p is already in use -- a stray VM or a control plane from an earlier run?" >&2
+		exit 1
+	fi
+done
 
 # Every phase line carries the elapsed seconds. The point of this test is to
 # be quick, and the only way to keep it that way is to be able to see where the
@@ -440,19 +465,30 @@ splice_image() {
 boot() {
 	local n=$1
 	log "booting the node image (run $n/$BOOTS)"
-	# Nothing is fed to the console. The node brings itself up from
-	# configs/node/uinit.sh, which DIT installs as /bin/uinit: init runs it,
-	# waits for it to return, and then falls through to a shell. Feeding a script
-	# to the serial console is what this used to do, and it cost a great deal of
-	# time -- the console drops characters when handed a lot at once, so the
-	# script arrived corrupted and the guest stopped partway through with no
-	# error, and every log that should have followed was never reached.
-	qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
+	# Hold stdin open past the script so gosh does not see EOF and exit, and feed
+	# it one line at a time: handing the whole script to the serial port at once
+	# overruns the guest's UART, and the guest stops partway through with no error.
+	#
+	# The bring-up itself used to live in the image, as a /bin/uinit that u-root's
+	# init ran. That is the better shape -- a node should bring itself up -- but
+	# gosh is not bash and it cost a great deal: a 157-character line did not
+	# survive being read from a file, losing a redirect and its trailing `&`, and
+	# background jobs started without nohup die when the shell that started them
+	# goes away, so kubelet never survived. A Go uinit would have neither problem,
+	# and is the way to do this if it is tried again.
+	{
+		# Cilium's DaemonSet mounts /lib/modules unconditionally, and this image
+		# has no modules and so no such directory.
+		if [ "$CNI" = cilium ]; then
+			printf 'mkdir -p /lib/modules\n'
+		fi
+		cat "$GUEST"
+	} | feed_guest "$CP/qemu.pid" | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
 			-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
 			-device virtio-net-pci,netdev=n0 \
 			-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
 			-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
-			-nographic -no-reboot </dev/null > "$CP/boot$n.log" 2>&1 &
+			-nographic -no-reboot > "$CP/boot$n.log" 2>&1 &
 	echo $! > "$CP/qemu.pid"
 }
 
@@ -483,19 +519,46 @@ stop_guest() {
 # image: the serial console cannot be trusted with bulk output, a file that is
 # read does not have to be printed at the right moment to be caught, and catting
 # a log to a 115200-baud line takes minutes.
+#
+# Two things here are load-bearing rather than stylistic.
+#
+# `timeout`, because ConnectTimeout bounds only the TCP connect -- and QEMU's user
+# networking port forward accepts the connection immediately whether or not
+# anything is listening in the guest. So a connect to a guest whose sshd has not
+# started yet succeeds, and ssh then waits forever for a banner that is never
+# coming. That hung a whole run for fifteen minutes with no output at all, in
+# wait_ssh, which is called the moment the node boots.
+#
+# LogLevel=ERROR rather than -q, and no swallowing of the exit status: with -q a
+# dropped connection produced the same empty output as an empty file, which made
+# "the kubelet log is empty" and "ssh did not work" indistinguishable.
 guest_get() {
-	ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		-o BatchMode=yes -o ConnectTimeout=5 -i "$SSH/client" \
-		-p "$SSH_PORT" root@127.0.0.1 "$@" 2>&1 || true
+	local out rc
+	out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null -o BatchMode=yes \
+		-o ConnectTimeout=5 -i "$SSH/client" -p "$SSH_PORT" \
+		root@127.0.0.1 "$@" 2>&1); rc=$?
+	if [ "$rc" = 124 ]; then
+		printf '(ssh to the node timed out)\n'
+		return 0
+	fi
+	printf '%s\n' "$out"
 }
 
+# Bounded, short, and loud. Each attempt is capped by guest_get's timeout, and
+# the count is small: the point of this function is to find out whether the
+# node's sshd is up, not to wait fifteen minutes for it. A silent 45-attempt
+# version of this is what turned a broken ssh into a run that hung until its
+# outer timeout with no output at all.
 wait_ssh() {
-	local i
-	for i in $(seq 1 45); do
-		if guest_get true >/dev/null 2>&1; then
+	local i out
+	for i in $(seq 1 10); do
+		out=$(guest_get true)
+		if [ -z "$out" ]; then
 			return 0
 		fi
-		sleep 1
+		echo "  ssh attempt $i: $out" >&2
+		sleep 2
 	done
 	return 1
 }
@@ -533,6 +596,9 @@ diag() {
 		printf '  %-7s %s\n' "$m" \
 			"$(guest_get "cat /var/log/k4s-$m/result 2>/dev/null" | tr '\n' ' ')" >&2
 	done
+	echo "  --- is the node's containerd still alive? ---" >&2
+	guest_get 'ctr version' | sed 's/^/  /' >&2
+	guest_get 'ls -la /tmp' | sed 's/^/  /' >&2
 	echo "  --- cni on disk ---" >&2
 	guest_get 'ls /etc/cni/net.d; ls /opt/cni/bin' | sed 's/^/  /' >&2
 	echo "  --- cilium-cni plugin log ---" >&2
@@ -849,15 +915,18 @@ cleanup() {
 trap cleanup EXIT
 
 boot 1
+# Wait for the Node object first: it is an apiserver poll and needs no ssh, and
+# asking a node for ssh the instant it boots is a race that costs a timeout every
+# time sshd is not up yet.
 if ! wait_node_exists; then
 	echo "node did not register" >&2
+	wait_ssh || echo "  (and its sshd is not answering either)" >&2
+	diag
 	tail -30 "$CP/boot1.log" >&2
 	exit 1
 fi
 echo "node: ok (registered)"
-# The guest's sshd comes up early, and every diagnostic from here on reads the
-# node over ssh rather than off the console.
-wait_ssh || echo "warning: the guest's sshd did not come up" >&2
+wait_ssh || echo "warning: the node's sshd did not come up" >&2
 # The CNI goes on before waiting for Ready, not after: Cilium installs its own
 # CNI config, so the node stays NotReady (NetworkReady=false) until the agent is
 # running, and the agent is a DaemonSet that only exists once the node does.

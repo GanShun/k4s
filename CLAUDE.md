@@ -223,6 +223,14 @@ and keep lines short enough not to wrap on the serial console.
 daemons in the background and returns leaves the console at a shell afterwards.
 The harness then reads the results out of the node over **ssh**.
 
+`uinit.sh` is read by gosh one line at a time, and gosh is not bash. Every line
+must be a complete command — no multi-line blocks, no backslash continuations —
+and **`A && B &` is accepted and then does nothing at all**. That is how kubelet
+came to never start: the line was there, the node never registered, and the only
+clue was that `/tmp/kubelet.log` did not exist, which a shell would have created
+before exec'ing. Keep background launches on their own line as plain
+`nohup cmd ... &`.
+
 That split is not cosmetic. Feeding a script to the serial console is fragile in
 three ways that all cost real time here: the console drops characters when handed
 a lot at once, so the script arrives corrupted and the guest stops partway
