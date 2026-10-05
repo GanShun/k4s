@@ -35,8 +35,8 @@ make clean     # remove build products (keeps the kernel checkout)
 `make test-cluster` is the M1 join test and takes several minutes: it builds the
 control-plane binaries, generates throwaway PKI, boots a **control plane VM**
 (etcd, apiserver, controller-manager, scheduler) and then the node twice (join,
-then reboot-and-rejoin). It prints `node: ok`, `pod: ok`, `netns pod: ok`,
-`daemonset: ok`, `deployment: ok`, `cluster: ok`. `K4S_BOOTS` (default 2) sets
+then reboot-and-rejoin). It prints `node: ok`, `flannel: ok`, `pod: ok`,
+`netns pod: ok`, `daemonset: ok`, `deployment: ok`, `cluster: ok`. `K4S_BOOTS` (default 2) sets
 the number of boots. Both VMs are killed on exit.
 
 The control plane is a VM rather than host processes because a node should join
@@ -231,13 +231,16 @@ container's own `K4S_CONTAINER_OK` output.
 
 ## Known limitations
 
-- **No pod network.** The image ships only the loopback CNI plugin, and
-  `make test-cluster` asserts both halves: a `hostNetwork` pod runs, and a pod
-  with its own netns cannot start (`failed to find network info for sandbox`).
-  The conflist is load-bearing even so — the CRI will not report `NetworkReady`
-  with an empty `/etc/cni/net.d`. The "networking baseline" section of
-  `docs/roadmap.md` has the mechanics, and `docs/cilium.md` prices what a real
-  CNI would need.
+- **The pod network is flannel, as a DaemonSet.** flanneld runs in a
+  `kube-system` DaemonSet out of the node's own `/bbin`; the CNI plugin, the
+  delegates and the conflist are baked into the image. Masquerade and port
+  mappings are off: no `iptables` binary and no filter or NAT table in the
+  kernel, so pods reach each other on the node and not the outside world.
+- **A pod cannot reach the apiserver through its ClusterIP.** There is no
+  kube-proxy and no service routing, so anything in a pod that talks to the
+  apiserver must be given its address — `KUBERNETES_SERVICE_HOST`/`PORT` for
+  flannel, `k8sServiceHost` for Cilium. See the networking section of
+  `docs/roadmap.md`; `docs/cilium.md` prices what Cilium would need.
 - **Seccomp is enforced, and the rules are a search tree.** The fork compiles
   the profile in Go and installs it, so a `RuntimeDefault` pod really runs under
   `SECCOMP_MODE_FILTER` (the M1 test asserts it). A syscall costs O(log rules)

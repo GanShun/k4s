@@ -10,8 +10,8 @@
 #   3. build a control plane image with the PKI baked in, boot it as a VM, and
 #      wait for the apiserver through a port forward on 127.0.0.1:6443
 #   4. splice the kubelet kubeconfig into a copy of the node initramfs
-#   5. boot the node image, wait for it to register, create the pod, and check
-#      the container wrote its marker
+#   5. boot the node image, wait for it to register, apply the flannel DaemonSet
+#      so the node has a CNI, then create the pods and check their markers
 #   5b. also create a pod that asks for its own network namespace, and check it
 #      gets an address from the CNI
 #   5c. apply a DaemonSet and a Deployment, so the controller-manager and the
@@ -49,6 +49,7 @@ CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
 NETNS_POD=$CONFIGS/netns-pod.yaml
 DS=$CONFIGS/ds-pod.yaml
+FLANNEL_DS=$CONFIGS/flannel-ds.yaml
 DEPLOY=$CONFIGS/deploy-pod.yaml
 BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-240}
 BOOTS=${K4S_BOOTS:-2}
@@ -278,6 +279,14 @@ cp_up() {
 		tail -40 "$CP/controlplane.log" >&2
 		exit 1
 	fi
+	# The guest checks each service rather than assuming, because a service that
+	# refused to start leaves everything else looking normal.
+	if ! grep -qa 'K4S_CP: apiserver: ok' "$CP/controlplane.log"; then
+		echo "a service in the control plane VM failed to start" >&2
+		grep -a 'K4S_CP: ' "$CP/controlplane.log" >&2
+		grep -a -A5 'apiserver log tail' "$CP/controlplane.log" >&2
+		exit 1
+	fi
 	if ! wait_apiserver; then
 		echo "the apiserver never became healthy in the control plane VM" >&2
 		tail -40 "$CP/controlplane.log" >&2
@@ -371,6 +380,43 @@ run_netns_pod() {
 	done
 	echo "netns pod: FAILED (never reached Running)" >&2
 	K describe pod k4s-netns 2>&1 | tail -25 | sed 's/^/  /' >&2
+	return 1
+}
+
+# flanneld is a DaemonSet now, so the node has a CNI only once its pod is
+# running: it writes the subnet file the CNI plugin reads, and nothing with a
+# network namespace of its own can start before that. It is hostNetwork, so it
+# needs no CNI to start itself.
+run_flannel() {
+	log "applying the flannel DaemonSet"
+	# flanneld exits rather than retrying when it cannot take a subnet lease, and
+	# a lease needs the node to have a spec.podCIDR, which the controller-manager
+	# assigns a few seconds after the node registers. Applying this before that
+	# lands puts flanneld into a restart backoff for no reason, so wait for it.
+	local i cidr
+	for i in $(seq 1 60); do
+		cidr=$(K get node "$NODE" -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
+		[ -n "$cidr" ] && break
+		sleep 1
+	done
+	if [ -z "$cidr" ]; then
+		echo "flannel: FAILED (the node never got a podCIDR from the controller-manager)" >&2
+		return 1
+	fi
+	echo "node podCIDR: $cidr"
+	K apply -f "$FLANNEL_DS" >/dev/null
+	local ready
+	for i in $(seq 1 90); do
+		ready=$(K get daemonset k4s-flannel -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
+		if [ "${ready:-0}" = 1 ]; then
+			echo "flannel: ok (the DaemonSet is up and holds a subnet lease)"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "flannel: FAILED (DaemonSet ready=${ready:-0})" >&2
+	K get daemonset,pods -n kube-system -o wide 2>&1 | sed 's/^/  /' >&2
+	K describe pod -n kube-system -l app=k4s-flannel 2>&1 | tail -25 | sed 's/^/  /' >&2
 	return 1
 }
 
@@ -475,6 +521,9 @@ if ! wait_node; then
 	exit 1
 fi
 echo "node: ok (registered and Ready)"
+# flannel first: everything below that asks for its own network namespace needs
+# the subnet file it writes. The smoke pod is hostNetwork and would not care.
+run_flannel
 # Both pods go on together: one hostNetwork, one asking for a CNI, which
 # together are the whole statement about this node's networking.
 run_pod
@@ -492,6 +541,9 @@ for n in $(seq 2 "$BOOTS"); do
 		exit 1
 	fi
 	echo "node: ok (rejoined)"
+	# The DaemonSet object outlived the reboot, so its pod comes back on its own;
+	# this waits for it before the pods that need the CNI.
+	run_flannel
 	run_pod
 	# The pod objects outlived the reboot, so the controllers recreate them on
 	# their own; this waits for them and re-checks the addresses the CNI hands

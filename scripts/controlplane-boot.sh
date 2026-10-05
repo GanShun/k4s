@@ -37,6 +37,10 @@ sleep 5
 # replaced. With the controller-manager running the token controller, pods then
 # get a service account token, which is what anything talking to the apiserver
 # from inside a pod needs -- the Cilium agent and operator, for instance.
+# The ca.crt a pod is given comes from the kube-root-ca.crt ConfigMap, which the
+# controller-manager publishes from its own --root-ca-file: kube-apiserver had
+# that flag too until it was removed, and passing it here is now an error that
+# stops the apiserver from starting at all.
 kube-apiserver --etcd-servers=http://127.0.0.1:2379 --secure-port=6443 --bind-address=0.0.0.0 --tls-cert-file=/etc/kubernetes/pki/apiserver.crt --tls-private-key-file=/etc/kubernetes/pki/apiserver.key --client-ca-file=/etc/kubernetes/pki/ca.crt --service-account-key-file=/etc/kubernetes/pki/sa.pub --service-account-signing-key-file=/etc/kubernetes/pki/sa.key --service-account-issuer=https://10.0.2.2:6443 --service-cluster-ip-range=10.96.0.0/12 --authorization-mode=AlwaysAllow --allow-privileged=true </dev/null >/tmp/apiserver.log 2>&1 &
 sleep 15
 
@@ -56,6 +60,13 @@ echo "--- apiserver log tail ---"
 tail -n 5 /tmp/apiserver.log
 echo "--- controller-manager log tail ---"
 tail -n 5 /tmp/controller-manager.log
+
+# Say whether each service is actually up, rather than assuming: an apiserver
+# that refused to start leaves this script looking exactly like a healthy one,
+# and the only symptom is a health check that never passes.
+grep -qiE '^Error|unknown flag' /tmp/apiserver.log && echo "K4S_CP: apiserver: fail" || echo "K4S_CP: apiserver: ok"
+grep -qiE '^Error|unknown flag' /tmp/controller-manager.log && echo "K4S_CP: controller-manager: fail" || echo "K4S_CP: controller-manager: ok"
+grep -qiE '^Error|unknown flag' /tmp/scheduler.log && echo "K4S_CP: scheduler: fail" || echo "K4S_CP: scheduler: ok"
 
 echo "K4S_CP_READY"
 

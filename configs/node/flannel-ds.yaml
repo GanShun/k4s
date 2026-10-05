@@ -1,0 +1,110 @@
+# flanneld as a DaemonSet, which is how it is deployed for real.
+#
+# It runs the flanneld that is already in the node image, out of /bbin, rather
+# than pulling flannel's own container image. That is deliberate: this image
+# builds flanneld from the pure-Go fork (see DIT), and pulling the upstream
+# image would replace that with a glibc build and a second copy of the same
+# program. The node's image is the unit of configuration here -- the CNI plugin
+# and the conflist are baked for the same reason -- so the DaemonSet's job is to
+# run it with the right privileges and mounts, not to supply it.
+#
+# hostNetwork is not optional: flanneld programs the host's routing table, so it
+# has to be in the host's network namespace, and it must start before any pod
+# that needs a network, which hostNetwork also makes possible. Nothing needs the
+# CNI to start the CNI.
+#
+# NODE_NAME is what tells flanneld which Node object to annotate and take a
+# subnet lease from. Running as a pod it could use POD_NAME/POD_NAMESPACE and
+# look itself up, but the downward API handing it the node directly is simpler
+# and skips a round trip to the apiserver.
+#
+# It authenticates with its service account, which is why the control plane has
+# ServiceAccount admission on: this pod is the first thing here to talk to the
+# apiserver from inside a pod.
+#
+# KUBERNETES_SERVICE_HOST/PORT are set explicitly, and that is not a detail.
+# In-cluster configuration normally points at the `kubernetes` service's
+# ClusterIP, and reaching a ClusterIP needs service routing -- kube-proxy, or a
+# CNI that replaces it. This node has neither yet, so the ClusterIP is a
+# black hole and flanneld would never reach the apiserver. Pointing it at the
+# apiserver's real address is the same escape hatch Cilium exposes as
+# k8sServiceHost, for the same reason. kubelet only injects the ClusterIP
+# values when the pod does not set them itself, so these win.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: k4s-flannel
+  namespace: kube-system
+  labels:
+    app: k4s-flannel
+spec:
+  selector:
+    matchLabels:
+      app: k4s-flannel
+  template:
+    metadata:
+      labels:
+        app: k4s-flannel
+    spec:
+      hostNetwork: true
+      # Nothing here should be evicted for a diskless node that is doing the
+      # only job it has.
+      priorityClassName: system-node-critical
+      containers:
+        - name: flannel
+          # Only for a shell and a filesystem; the program comes from /bbin.
+          image: docker.io/library/busybox:1.36
+          # The log goes to a hostPath so the guest can print it: without a
+          # kubelet client certificate the apiserver cannot proxy logs from the
+          # kubelet, so `kubectl logs` does not work against this test cluster.
+          command:
+            - /bin/sh
+            - -c
+            - exec /bbin/flannel --kube-subnet-mgr --iface=eth0 --iptables-forward-rules=false >>/var/log/k4s-flannel/flannel.log 2>&1
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # The apiserver's address as the node sees it: 10.0.2.2 is the host
+            # from inside the node's user-mode network, and the control plane
+            # VM's apiserver is forwarded there. It is on the certificate.
+            - name: KUBERNETES_SERVICE_HOST
+              value: "10.0.2.2"
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
+          securityContext:
+            # It writes routes, which needs CAP_NET_ADMIN in the host's network
+            # namespace, and reads /proc/sys.
+            privileged: true
+          volumeMounts:
+            - name: bbin
+              mountPath: /bbin
+              readOnly: true
+            # Where flanneld writes the subnet it leased. This has to be the
+            # host's /run/flannel, because the thing that reads subnet.env is
+            # the CNI plugin, which the runtime runs on the host.
+            - name: run-flannel
+              mountPath: /run/flannel
+            # The network config, baked into the node image rather than
+            # supplied as a ConfigMap, for the same reason as the plugin.
+            - name: net-conf
+              mountPath: /etc/kube-flannel
+              readOnly: true
+            - name: log
+              mountPath: /var/log/k4s-flannel
+      volumes:
+        - name: bbin
+          hostPath:
+            path: /bbin
+        - name: run-flannel
+          hostPath:
+            path: /run/flannel
+            type: DirectoryOrCreate
+        - name: net-conf
+          hostPath:
+            path: /etc/kube-flannel
+        - name: log
+          hostPath:
+            path: /var/log/k4s-flannel
+            type: DirectoryOrCreate

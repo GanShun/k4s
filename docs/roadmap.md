@@ -130,22 +130,33 @@ plane has no scheduler.
 
 ### Networking: from no CNI to flannel, and the bug in between (2026-10-05)
 
-The image now ships a real CNI: flanneld plus the flannel meta-plugin and its
-bridge and host-local delegates, all pinned, with the network config baked at
+The image ships a real CNI: the flannel meta-plugin and its bridge and
+host-local delegates, all pinned, with the network config baked at
 `/etc/kube-flannel/net-conf.json` (host-gw, because this kernel has no VXLAN).
+flanneld itself runs as a **DaemonSet** (`configs/node/flannel-ds.yaml`), the way
+it is deployed for real, out of the node's own `/bbin` rather than from flannel's
+container image: this image builds flanneld from the pure-Go fork, and pulling
+the upstream image would replace that with a glibc build of the same program.
+
 A pod that asks for its own network namespace gets an address from
 `10.244.0.0/16`, and `make test-cluster` asserts that from both ends: the
 apiserver's view of `.status.podIP`, and the container's own view of `eth0`. It
 asserts it again after a reboot.
 
-Four things were needed, each found by a distinct failure:
+Five things were needed, each found by a distinct failure:
 
 | Missing | Symptom |
 | --- | --- |
 | `CONFIG_BRIDGE_NETFILTER` | flanneld exits at startup: it stats `/proc/sys/net/bridge/bridge-nf-call-iptables` and refuses to run without br_netfilter |
-| `NODE_NAME` in the guest | flanneld wants `POD_NAME`/`POD_NAMESPACE` (the DaemonSet downward API) or `NODE_NAME`, and exits rather than retrying |
-| a controller-manager | flannel will not register a node with no `spec.podCIDR`, which only kube-controller-manager assigns; the harness runs one with `--allocate-node-cidrs` |
+| `NODE_NAME` in the pod | flanneld wants `POD_NAME`/`POD_NAMESPACE` or `NODE_NAME`, and exits rather than retrying; the DaemonSet passes `spec.nodeName` through the downward API |
+| a controller-manager | flannel will not register a node with no `spec.podCIDR`, which only kube-controller-manager assigns; the control plane VM runs one with `--allocate-node-cidrs` |
 | `"ipMasq": false` in the conflist | the flannel plugin sets `ipMasq = !FLANNEL_IPMASQ` in its delegate, so `--ip-masq=false` made the bridge plugin do the masquerading and need an `iptables` binary the image does not have |
+| the apiserver's real address | in-cluster configuration points at the `kubernetes` service's ClusterIP, and reaching a ClusterIP needs service routing -- kube-proxy, or a CNI that replaces it. This node has neither, so flanneld could never reach the apiserver. `KUBERNETES_SERVICE_HOST`/`PORT` are set explicitly in the DaemonSet, which is the same escape hatch Cilium exposes as `k8sServiceHost`, for the same reason |
+
+That last one is worth remembering when Cilium is tried: its agent and operator
+have exactly the same problem, and `k8sServiceHost`/`k8sServicePort` are how it
+is solved there. It also means the first CNI on a node cannot assume service
+routing exists.
 
 The last is worth remembering as a trap: flannel's flag is inverted on the way to
 the CNI plugin, so the daemon's `--ip-masq=false` does not mean "no
