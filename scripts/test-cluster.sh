@@ -36,6 +36,12 @@
 
 set -euo pipefail
 
+# Say where it died. Under `set -e` a failing command aborts the script with its
+# own status and no explanation, which is how a whole leg came to end in a bare
+# "Error 255" with the last successful line being "deployment: ok". Knowing the
+# line number turns that from a guess into a fact.
+trap 'echo "test-cluster.sh: failed at line $LINENO (exit $?)" >&2' ERR
+
 KERNEL=${1:-build/kernel/arch/x86/boot/bzImage}
 BASE=${2:-initramfs.cpio}
 
