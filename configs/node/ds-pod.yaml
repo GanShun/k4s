@@ -1,0 +1,40 @@
+# A DaemonSet, to prove the control plane can actually run one.
+#
+# The DaemonSet controller lives in kube-controller-manager, and it assigns the
+# node itself, so this needs no scheduler -- which is why it is the first thing
+# to test. The pod asks for its own network namespace, so it also proves the CNI
+# works for pods nobody pinned by hand.
+#
+# It writes to a hostPath because the apiserver cannot reach kubelet here to
+# fetch logs; the guest prints the file and the harness reads it out of the
+# console.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: k4s-ds
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: k4s-ds
+  template:
+    metadata:
+      labels:
+        app: k4s-ds
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: ds
+          image: docker.io/library/busybox:1.36
+          command:
+            - "sh"
+            - "-c"
+            - "exec 2>>/out/result; echo K4S_DS_OK >> /out/result; ip addr show eth0 | grep 'inet ' >> /out/result; sleep 3600"
+          volumeMounts:
+            - name: out
+              mountPath: /out
+      volumes:
+        - name: out
+          hostPath:
+            path: /var/log/k4s-ds
+            type: DirectoryOrCreate

@@ -52,6 +52,13 @@ UEFI PXE
               -> TLS bootstrap, join cluster
 ```
 
+For testing, the cluster it joins is a second QEMU VM of the same shape: an
+initramfs with etcd, kube-apiserver, kube-controller-manager and kube-scheduler
+(see `scripts/controlplane-boot.sh`). It exists so that what the node joins is a
+real control plane — with pod CIDR allocation, the DaemonSet and Deployment
+controllers, a scheduler and service account tokens — rather than the etcd and
+apiserver only pair the test started with on the host.
+
 - No disk is mounted anywhere, ever.
 - Stable identity: DMI/SMBIOS UUID or TPM EK becomes the node name; DHCP
   option 12 as fallback.
@@ -85,12 +92,20 @@ UEFI PXE
 - Join a throwaway test cluster and run a pod.
 - Acceptance: reboot the QEMU VM, it rejoins, the workload returns.
 
-**Status: done (2026-10-04).** `make test-cluster` stands up a throwaway control
-plane on the host (etcd and kube-apiserver built from the pinned sources), issues
-a kubelet kubeconfig, splices it into a copy of the initramfs, boots the node,
-waits for it to register, applies `configs/node/smoke-pod.yaml`, and checks the
-container wrote its marker to a hostPath. It then boots the *same image* again
-and checks the node rejoins and the pod returns.
+**Status: done (2026-10-04).** `make test-cluster` stands up a throwaway
+**control plane VM** (etcd, kube-apiserver, kube-controller-manager and
+kube-scheduler, all built from the pinned sources and carrying a per-run PKI),
+issues a kubelet kubeconfig, splices it into a copy of the initramfs, boots the
+node, waits for it to register, applies `configs/node/smoke-pod.yaml`, and checks
+the container wrote its marker to a hostPath. It then boots the *same image*
+again and checks the node rejoins and the pod returns.
+
+The control plane is a VM rather than host processes because the node should join
+something shaped like a real cluster, and because the controller-manager is what
+makes DaemonSets and Deployments possible at all — the test applies one of each
+and asserts both become ready, on both boots. ServiceAccount admission is on
+there too, so a pod can get a token and talk to the apiserver, which is what a
+CNI's own control plane (Cilium's agent and operator) needs.
 
 Five things the node image needed, each found by a distinct failure:
 

@@ -24,7 +24,7 @@ make image     # build initramfs.cpio (runs ./DIT)
 make kernel    # configure + build linux/ into build/kernel/bzImage
 make run       # boot the image interactively under QEMU
 make test      # boot headless and run scripts/guest-check.sh
-make test-cluster  # M1: throwaway control plane + kubelet joins + pod runs
+make test-cluster  # M1: throwaway control plane VM + kubelet joins + pods run
 make clean     # remove build products (keeps the kernel checkout)
 ```
 
@@ -32,11 +32,19 @@ make clean     # remove build products (keeps the kernel checkout)
 `container: ok` — and a `guest log:` path. `K4S_BOOT_TIMEOUT` (seconds, default
 180) caps the guest run.
 
-`make test-cluster` is the M1 join test and takes a few minutes: it builds the
-control-plane binaries, generates throwaway PKI, boots the node twice (join,
-then reboot-and-rejoin) and prints `node: ok`, `pod: ok`, `cluster: ok`.
-`K4S_BOOTS` (default 2) sets the number of boots. It leaves the control plane
-running, and regenerates etcd on every run.
+`make test-cluster` is the M1 join test and takes several minutes: it builds the
+control-plane binaries, generates throwaway PKI, boots a **control plane VM**
+(etcd, apiserver, controller-manager, scheduler) and then the node twice (join,
+then reboot-and-rejoin). It prints `node: ok`, `pod: ok`, `netns pod: ok`,
+`daemonset: ok`, `deployment: ok`, `cluster: ok`. `K4S_BOOTS` (default 2) sets
+the number of boots. Both VMs are killed on exit.
+
+The control plane is a VM rather than host processes because a node should join
+something shaped like a real cluster: the controller-manager assigns pod CIDRs,
+runs DaemonSets and Deployments and issues service account tokens. The host
+reaches its apiserver through a QEMU port forward on `127.0.0.1:6443`; the node
+reaches it at `10.0.2.2:6443`, which is the host from inside the node's
+user-mode network. Both are on the same certificate.
 
 Two prerequisites are **not** built by `make`:
 
@@ -95,7 +103,8 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflist, smoke pod |
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
-| `scripts/test-cluster.sh` | M1 join test: throwaway control plane + two guest boots |
+| `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |
+| `scripts/controlplane-boot.sh` | Guest half of that test: the control plane VM's own boot |
 | `scripts/cluster-check.sh` | The guest half of that test, piped into gosh |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/nsenter-and-runc.md` | Why runc normally needs cgo, and the fork |

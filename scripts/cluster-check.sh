@@ -31,7 +31,7 @@ echo "+pids" > /sys/fs/cgroup/cgroup.subtree_control
 echo "+io" > /sys/fs/cgroup/cgroup.subtree_control
 
 # No disk: everything the runtime and kubelet write is RAM.
-mkdir -p /run/containerd /var/lib/containerd /var/lib/kubelet /var/log/pods /var/log/k4s-smoke /var/log/k4s-netns
+mkdir -p /run/containerd /var/lib/containerd /var/lib/kubelet /var/log/pods /var/log/k4s-smoke /var/log/k4s-netns /var/log/k4s-ds /var/log/k4s-deploy
 mkdir -p /run/flannel
 mount -t tmpfs tmpfs /var/lib/containerd
 mount -t tmpfs tmpfs /var/lib/kubelet
@@ -78,14 +78,20 @@ sleep 30
 echo "--- marker @30s ---"
 cat /var/log/k4s-smoke/result
 cat /var/log/k4s-netns/result
+cat /var/log/k4s-ds/result
+cat /var/log/k4s-deploy/result
 sleep 25
 echo "--- marker @55s ---"
 cat /var/log/k4s-smoke/result
 cat /var/log/k4s-netns/result
+cat /var/log/k4s-ds/result
+cat /var/log/k4s-deploy/result
 sleep 25
 echo "--- marker @80s ---"
 cat /var/log/k4s-smoke/result
 cat /var/log/k4s-netns/result
+cat /var/log/k4s-ds/result
+cat /var/log/k4s-deploy/result
 
 # --- diagnostics ------------------------------------------------------------
 echo "--- kubelet log tail ---"
