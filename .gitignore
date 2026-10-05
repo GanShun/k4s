@@ -37,6 +37,7 @@ cni-plugins
 u-root
 kubernetes
 flannel
+flannel-cni-plugin
 initram*cpio
 coredns
 etcd

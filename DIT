@@ -57,6 +57,12 @@ KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8
 CNI_REPO=https://github.com/containernetworking/plugins.git
 CNI_REF=257ef09a103e8b8fe91a0fefe8680c01f84b520b           # main, 2026-09-15
 
+# flanneld is only half of flannel. The CNI half is a separate repository: a
+# meta-plugin that reads the subnet flanneld allocated out of
+# /run/flannel/subnet.env and invokes bridge and host-local with it.
+FLANNEL_CNI_REPO=https://github.com/flannel-io/cni-plugin.git
+FLANNEL_CNI_REF=b380f201008e9bed159703846cf10d3c50b4f9ce  # v1.9.1-flannel3
+
 # --- fetch ------------------------------------------------------------------
 # Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
 # what makes the image reproducible. An existing checkout is reused, so a rerun
@@ -83,6 +89,7 @@ clone_pinned etcd       "$ETCD_REPO"       "$ETCD_REF"
 clone_pinned flannel    "$FLANNEL_REPO"    "$FLANNEL_REF"
 clone_pinned kubernetes "$KUBERNETES_REPO" "$KUBERNETES_REF"
 clone_pinned cni-plugins "$CNI_REPO" "$CNI_REF"
+clone_pinned flannel-cni-plugin "$FLANNEL_CNI_REPO" "$FLANNEL_CNI_REF"
 
 # runc is used as checked out, not reset to a revision (see the note by its pin).
 if [ ! -e runc ]; then
@@ -130,11 +137,26 @@ mkdir -p build
 (cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
 	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=v1.35.8" \
 	-o ../build/kubelet ./cmd/kubelet)
-# loopback is the minimum CNI plugin. With no conflist on disk the CRI reports
-# NetworkReady=false, and kubelet then refuses to mark the node Ready or run
-# pods. The node's real CNI is undecided; this is enough for M1.
+# The CNI plugin set.
+#
+# loopback is required whichever CNI is chosen: the CRI synthesises a loopback
+# network of its own and invokes /opt/cni/bin/loopback for it.
+#
+# flannel is a meta-plugin. It reads the subnet flanneld allocated out of
+# /run/flannel/subnet.env and delegates the real work to bridge and host-local,
+# so all three have to be present for a pod to get an address.
+#
+# The node's production CNI is undecided (docs/cilium.md). flannel is here
+# because it needs nothing from the kernel that this one lacks, which is exactly
+# what cannot yet be said for Cilium.
 (cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
 	go build -o ../build/loopback ./plugins/main/loopback)
+(cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/bridge ./plugins/main/bridge)
+(cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/host-local ./plugins/ipam/host-local)
+(cd flannel-cni-plugin && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/cni-flannel .)
 
 # --- assemble ---------------------------------------------------------------
 # Node configuration that is not a secret. The kubelet kubeconfig is NOT here:
@@ -151,7 +173,11 @@ CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 	-files configs/node/group:etc/group \
 	-files configs/node/hosts:etc/hosts \
 	-files build/loopback:opt/cni/bin/loopback \
-	-files configs/node/10-loopback.conflist:etc/cni/net.d/10-loopback.conflist \
+	-files build/bridge:opt/cni/bin/bridge \
+	-files build/host-local:opt/cni/bin/host-local \
+	-files build/cni-flannel:opt/cni/bin/flannel \
+	-files configs/node/10-flannel.conflist:etc/cni/net.d/10-flannel.conflist \
+	-files configs/node/flannel-net-conf.json:etc/kube-flannel/net-conf.json \
 	u-root/cmds/core/* \
 	./containerd/cmd/containerd \
 	./containerd/cmd/ctr \

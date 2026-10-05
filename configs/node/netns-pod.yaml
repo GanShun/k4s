@@ -1,21 +1,20 @@
-# The pod that needs a CNI, on a node that has none.
+# The pod that needs a CNI.
 #
-# This is the negative half of the M1 networking story, and it is here on
-# purpose. With only the loopback plugin on disk, containerd's setupPodNetwork
-# finds no IP on eth0 in the CNI result and refuses to create the sandbox:
+# This is the half of the networking story the smoke pod cannot tell: the smoke
+# pod is hostNetwork and so never touches CNI, whereas this one asks for its own
+# network namespace and therefore only runs if a CNI actually assigns it an
+# address. It writes what it can see of its own interface to a hostPath, so the
+# test can check the address from both ends: the apiserver's view of
+# .status.podIP and the container's view of eth0.
 #
-#   failed to setup network for sandbox "...": failed to find network info for sandbox "..."
-#
-# so a pod like this never starts. scripts/test-cluster.sh asserts that it fails
-# in exactly that way, which turns "the node works without a CNI" from a guess
-# into a claim with a known boundary. The boundary is a CNI that assigns the
-# sandbox an address, not merely a CNI config file being present.
-#
-# When a real CNI lands, this pod starts, the check fails, and the check has to
-# be turned into the positive one ("the pod got an address and can be reached").
+# It has been both halves of that story. With only the loopback plugin on disk
+# containerd refused to create the sandbox ("failed to find network info for
+# sandbox ..."), because the CNI result had no address on eth0; the harness
+# asserted that failure. Now that flannel is in the image this pod must run, and
+# the harness asserts an address in the flannel subnet instead.
 #
 # nodeName pins it as with the smoke pod: the throwaway control plane has no
-# scheduler. No marker file, because it is not expected to run.
+# scheduler.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -23,8 +22,22 @@ metadata:
   namespace: default
 spec:
   nodeName: k4s-node-1
-  restartPolicy: Never
+  # Always, for the same reason as the smoke pod: a reboot wipes the runtime
+  # state, and the pod object outliving it is what makes "the network comes back
+  # after a reboot" a thing this test can assert.
+  restartPolicy: Always
   containers:
     - name: netns
       image: docker.io/library/busybox:1.36
-      command: ["sh", "-c", "sleep 3600"]
+      command:
+        - "sh"
+        - "-c"
+        - "exec 2>>/out/result; echo K4S_NETNS_OK >> /out/result; ip addr show eth0 | grep 'inet ' >> /out/result; sleep 3600"
+      volumeMounts:
+        - name: out
+          mountPath: /out
+  volumes:
+    - name: out
+      hostPath:
+        path: /var/log/k4s-netns
+        type: DirectoryOrCreate

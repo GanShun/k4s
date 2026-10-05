@@ -11,8 +11,8 @@
 #   4. splice the kubeconfig into a copy of the initramfs
 #   5. boot the node image, wait for it to register, create the pod, and check
 #      the container wrote its marker
-#   5b. also create a pod that asks for its own network namespace, and check
-#      that it cannot start: that is the boundary of the no-CNI node
+#   5b. also create a pod that asks for its own network namespace, and check it
+#      gets an address from the CNI
 #   6. boot it again, unchanged, and check it rejoins and the pod returns
 #
 # The kubeconfig is issued per run and spliced in; it is never committed.
@@ -55,20 +55,23 @@ K() {
 
 # --- control plane ----------------------------------------------------------
 build_control_plane() {
-	if [ -x "$CP/etcd" ] && [ -x "$CP/kube-apiserver" ] && [ -x "$CP/kubectl" ]; then
+	if [ -x "$CP/etcd" ] && [ -x "$CP/kube-apiserver" ] && [ -x "$CP/kubectl" ] \
+		&& [ -x "$CP/kube-controller-manager" ]; then
 		return 0
 	fi
-	log "building control plane binaries (etcd, kube-apiserver, kubectl)"
+	log "building control plane binaries (etcd, kube-apiserver, kubectl, controller-manager)"
 	mkdir -p "$CP"
 	(cd etcd/server && GOWORK=off CGO_ENABLED=0 go build -o ../../build/controlplane/etcd .)
 	(cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS \
 		go build -mod=vendor -o ../build/controlplane/kube-apiserver ./cmd/kube-apiserver)
 	(cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS \
 		go build -mod=vendor -o ../build/controlplane/kubectl ./cmd/kubectl)
+	(cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS \
+		go build -mod=vendor -o ../build/controlplane/kube-controller-manager ./cmd/kube-controller-manager)
 }
 
 gen_pki() {
-	if [ -f "$PKI/ca.crt" ] && [ -f "$NODEDIR/kubeconfig" ]; then
+	if [ -f "$PKI/ca.crt" ] && [ -f "$NODEDIR/kubeconfig" ] && [ -f "$PKI/admin.kubeconfig" ]; then
 		return 0
 	fi
 	log "generating throwaway PKI"
@@ -124,10 +127,33 @@ EOF
 		echo "    user: kubelet"
 		echo "current-context: k4s"
 	} > "$NODEDIR/kubeconfig"
+	# The controller-manager runs on the host, so it uses the admin identity and
+	# the loopback address. It needs to be able to patch Nodes, which is what
+	# gives a node its spec.podCIDR -- and flannel refuses to start without one.
+	{
+		echo "apiVersion: v1"
+		echo "kind: Config"
+		echo "clusters:"
+		echo "- name: k4s"
+		echo "  cluster:"
+		echo "    server: $APISERVER"
+		echo "    certificate-authority-data: $(base64 -w0 "$PKI/ca.crt")"
+		echo "users:"
+		echo "- name: admin"
+		echo "  user:"
+		echo "    client-certificate-data: $(base64 -w0 "$PKI/admin.crt")"
+		echo "    client-key-data: $(base64 -w0 "$PKI/admin.key")"
+		echo "contexts:"
+		echo "- name: k4s"
+		echo "  context:"
+		echo "    cluster: k4s"
+		echo "    user: admin"
+		echo "current-context: k4s"
+	} > "$PKI/admin.kubeconfig"
 }
 
 cp_down() {
-	for p in apiserver etcd; do
+	for p in apiserver etcd controller-manager; do
 		if [ -f "$CP/$p.pid" ]; then
 			kill "$(cat "$CP/$p.pid")" 2>/dev/null || true
 			rm -f "$CP/$p.pid"
@@ -147,7 +173,7 @@ cp_down() {
 # so it killed its own caller. Matching the executable cannot do that.
 kill_binaries() {
 	local target pid exe
-	for target in "$CP/kube-apiserver" "$CP/etcd"; do
+	for target in "$CP/kube-apiserver" "$CP/etcd" "$CP/kube-controller-manager"; do
 		target=$(readlink -f "$target" 2>/dev/null) || continue
 		for pid in /proc/[0-9]*; do
 			pid=${pid#/proc/}
@@ -199,6 +225,30 @@ cp_up() {
 		exit 1
 	fi
 	echo "apiserver: ok"
+
+	# The controller-manager is here for --allocate-node-cidrs: a node only gets
+	# its spec.podCIDR from this, and flannel refuses to register without one
+	# ("node %q pod cidr not assigned"). The cluster CIDR has to match flannel's
+	# network config, and the mask size is what makes each node a /24, which is
+	# flannel's default subnet length.
+	log "starting kube-controller-manager (node CIDR allocation)"
+	nohup "$CP/kube-controller-manager" \
+		--kubeconfig="$PKI/admin.kubeconfig" \
+		--allocate-node-cidrs=true \
+		--cluster-cidr=10.244.0.0/16 \
+		--node-cidr-mask-size=24 \
+		--service-cluster-ip-range=10.96.0.0/12 \
+		--service-account-private-key-file="$PKI/sa.key" \
+		--root-ca-file="$PKI/ca.crt" \
+		--leader-elect=false > "$CP/controller-manager.log" 2>&1 &
+	echo $! > "$CP/controller-manager.pid"
+	sleep 3
+	if ! kill -0 "$(cat "$CP/controller-manager.pid")" 2>/dev/null; then
+		echo "controller-manager exited at startup" >&2
+		tail -20 "$CP/controller-manager.log" >&2
+		exit 1
+	fi
+	echo "controller-manager: ok (node CIDR allocation on)"
 }
 
 # --- node image -------------------------------------------------------------
@@ -263,30 +313,29 @@ run_pod() {
 	return 1
 }
 
-# A pod that asks for its own network namespace must not start: containerd has
-# no address to give it, so it never creates the sandbox. Asserting the failure
-# is what gives "the node works without a CNI" a boundary; see netns-pod.yaml.
-check_netns_pod_cannot_start() {
-	local i ph msg
-	for i in $(seq 1 60); do
+# A pod that asks for its own network namespace only runs if the CNI gives it an
+# address, so this is the assertion that the node has a working pod network
+# rather than merely a CNI config file. Both ends are checked: the apiserver's
+# view of the address here, and the container's own view of eth0 in check_marker.
+run_netns_pod() {
+	log "applying the pod that needs a CNI"
+	K apply -f "$NETNS_POD" >/dev/null
+	local i ph ip
+	for i in $(seq 1 90); do
 		ph=$(K get pod k4s-netns -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		if [ "$ph" = Running ]; then
-			echo "netns pod: FAILED (a pod with its own netns started, so the node now has a CNI: invert this check)" >&2
-			K delete pod k4s-netns --wait=false >/dev/null 2>&1 || true
+			ip=$(K get pod k4s-netns -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+			if [[ "$ip" == 10.244.* ]]; then
+				echo "pod IP: $ip (from the flannel subnet)"
+				return 0
+			fi
+			echo "netns pod: FAILED (Running, but its address is ${ip:-<none>}, not from 10.244.0.0/16)" >&2
 			return 1
-		fi
-		msg=$(K get events --field-selector involvedObject.name=k4s-netns \
-			-o jsonpath='{.items[*].message}' 2>/dev/null || true)
-		if [[ "$msg" == *"failed to find network info"* ]]; then
-			echo "netns pod: ok (no CNI: a pod with its own netns cannot start, as expected)"
-			K delete pod k4s-netns --wait=false >/dev/null 2>&1 || true
-			return 0
 		fi
 		sleep 2
 	done
-	echo "netns pod: FAILED (no CNI error appeared; expected 'failed to find network info')" >&2
-	K describe pod k4s-netns 2>&1 | tail -20 | sed 's/^/  /' >&2
-	K delete pod k4s-netns --wait=false >/dev/null 2>&1 || true
+	echo "netns pod: FAILED (never reached Running)" >&2
+	K describe pod k4s-netns 2>&1 | tail -25 | sed 's/^/  /' >&2
 	return 1
 }
 
@@ -309,8 +358,24 @@ check_marker() {
 		rm -f "$clean"
 		return 1
 	fi
+	if ! grep -q 'K4S_NETNS_OK' "$clean"; then
+		echo "netns pod: FAILED (no K4S_NETNS_OK: the pod that needs a CNI did not run, $1)" >&2
+		tail -50 "$clean" >&2
+		rm -f "$clean"
+		return 1
+	fi
+	if ! grep -qE 'inet[[:space:]]+10\.244\.' "$clean"; then
+		echo "netns pod: FAILED (the container is not in the pod's network namespace)" >&2
+		echo "  the CRI gave the sandbox an address, but the container reports this interface:" >&2
+		grep -a -A2 'K4S_NETNS_OK' "$clean" | sed 's/^/    /' >&2 || true
+		echo "  cause: the cgo-free runc does not join namespaces given by path, so the" >&2
+		echo "  container inherits the host's. See docs/nsenter-and-runc.md." >&2
+		rm -f "$clean"
+		return 1
+	fi
 	echo "pod: ok (container wrote its marker)"
 	echo "seccomp: ok (container runs under a filter)"
+	echo "netns pod: ok (container has an address on eth0 from the CNI)"
 	rm -f "$clean"
 	return 0
 }
@@ -333,12 +398,10 @@ if ! wait_node; then
 	exit 1
 fi
 echo "node: ok (registered and Ready)"
-# Both pods go on together: the smoke pod must run, and the pod that needs a CNI
-# must not, which together are the whole statement about this node's networking.
+# Both pods go on together: one hostNetwork, one asking for a CNI, which
+# together are the whole statement about this node's networking.
 run_pod
-log "applying the pod that needs a CNI (it must not start)"
-K apply -f "$NETNS_POD" >/dev/null
-check_netns_pod_cannot_start
+run_netns_pod
 wait_qemu
 check_marker "$CP/boot1.log"
 
@@ -352,6 +415,9 @@ for n in $(seq 2 "$BOOTS"); do
 	fi
 	echo "node: ok (rejoined)"
 	run_pod
+	# The pod object outlived the reboot, so kubelet recreates it on its own;
+	# this waits for it and re-checks the address the CNI hands out.
+	run_netns_pod
 	wait_qemu
 	check_marker "$CP/boot$n.log"
 done

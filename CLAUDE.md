@@ -235,6 +235,11 @@ container's own `K4S_CONTAINER_OK` output.
   comparisons; `TestSectionIsATree` measures that, because a chain would still be
   correct. Architectures x/sys/unix has no table for (x32, the mips n32 ABIs,
   31-bit s390) are refused rather than filtered. See `docs/nsenter-and-runc.md`.
+- **Joining a namespace by path is not implemented**, so a CRI pod container
+  runs in the host's network, IPC and UTS namespaces: containerd hands them to
+  the container by path and the fork's `CloneFlags()` skips anything with a
+  path. `make test-cluster` asserts the container's own view of `eth0` and fails
+  on this. See `docs/nsenter-and-runc.md`.
 - **Rootless / user namespaces**: not supported. `CLONE_NEWUSER` plus the other
   namespaces in one `clone` returns `EPERM`; nsexec's staged unshare is the
   missing piece. The node runs containers as root, so this does not block it.

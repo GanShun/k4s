@@ -202,6 +202,29 @@ Verified on a node: the guest joins a throwaway apiserver and runs a pod with
   rest). The fork does not do this, so rootless containers do not work yet.
   The node runs containers as root, so this does not block it. `SysProcAttr`
   does support `UidMappings`/`GidMappings`; the staging is the missing part.
+- **Joining a namespace by path does not work, and that includes every CRI
+  pod.** `CloneFlags()` deliberately skips a namespace whose `Path` is set
+  (`libcontainer/configs/namespaces_syscall.go`), because the C `nsexec`
+  constructor is what would `setns` into it. In a `!cgo` build there is no
+  constructor, so nothing does, and the container silently inherits the host's
+  namespace of that type.
+
+  This is not a corner case. containerd's CRI hands every pod container its
+  sandbox's namespaces by path — `WithPodNamespaces` in
+  `internal/cri/opts/spec_opts.go` adds `/proc/<sandboxPid>/ns/net`,
+  `/ns/ipc` and `/ns/uts` — so a pod container here runs in the host's network,
+  IPC and UTS namespaces while the CRI believes it is in the sandbox's. (The PID
+  namespace is only passed by path when the pod shares its process namespace, so
+  a default pod still gets its own; the mount namespace has no path and is
+  created as usual.)
+
+  It was found by giving a pod a real address with flannel and asking the
+  container what it could see: the sandbox had `10.244.0.2` and the container
+  reported the host's `10.0.2.15` on `eth0`. `scripts/test-cluster.sh` asserts
+  the container's own view of its interface, so this is a failing check rather
+  than a silent one. Fixing it needs the staged `setns` that nsexec performs
+  before the Go runtime starts — the same machinery the user-namespace case
+  below needs, and the reason no CNI can be evaluated honestly before it exists.
 - **`runc exec` / setns path** (`setnsProcess`), checkpoint/restore (CRIU), and
   the mount-source remapping handshake — only the `create`/`run` path was
   exercised.
