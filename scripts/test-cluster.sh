@@ -393,12 +393,18 @@ boot() {
 	# Hold stdin open past the script so gosh does not see EOF and exit.
 	{
 		# Cilium's DaemonSet mounts /lib/modules unconditionally, and this image
-		# has no modules and so no such directory. It also installs its own CNI
-		# config, so the flannel one has to go or two conflists would be on disk
-		# and the CRI loads only the first.
+		# has no modules and so no such directory.
+		#
+		# The flannel conflist is deliberately left in place. Cilium runs with
+		# --cni-exclusive=true and removes non-Cilium conflists itself once it has
+		# written its own, and until then 05-cilium sorts ahead of 10-flannel, so
+		# Cilium wins either way. Deleting it here instead empties the directory
+		# before containerd starts, and the CRI loads that directory once: a
+		# directory with no conflist in it is ErrCNINotInitialized, so every
+		# sandbox gets created with no network -- no address, no CNI call, and
+		# nothing in containerd's log to say why.
 		if [ "$CNI" = cilium ]; then
 			printf 'mkdir -p /lib/modules\n'
-			printf 'rm -f /etc/cni/net.d/10-flannel.conflist\n'
 		fi
 		cat "$GUEST"
 	} | feed_guest "$CP/qemu.pid" | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
@@ -415,9 +421,19 @@ boot() {
 # BOOT_TIMEOUT + 60 here instead leaves the pipeline -- and therefore anything
 # that waits for it, including this script's own exit -- alive for up to eleven
 # minutes after the guest has powered off, which is dead time on every run.
+#
+# One line at a time, and slowly. Handing the whole script to the serial port at
+# once overruns the guest's UART and drops characters, which corrupts the script
+# and stops the guest partway through -- the console simply ends mid-file with no
+# error, and everything the guest was supposed to print afterwards is missing.
+# At 115200 baud a 78-character line takes about 7ms, so 50ms leaves plenty of
+# room; a 150-line script costs under eight seconds.
 feed_guest() {
-	local pidfile=$1
-	cat
+	local pidfile=$1 line
+	while IFS= read -r line; do
+		printf '%s\n' "$line"
+		sleep 0.05
+	done
 	while [ ! -s "$pidfile" ] || kill -0 "$(cat "$pidfile")" 2>/dev/null; do
 		sleep 1
 	done

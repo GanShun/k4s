@@ -91,37 +91,46 @@ cat /var/log/k4s-flannel/flannel.log
 cat /var/log/pods/*cilium-*/cilium-agent/*.log
 
 # --- diagnostics ------------------------------------------------------------
-echo "--- kubelet log tail ---"
-tail -n 30 /tmp/kubelet.log
-echo "--- containerd tail ---"
-tail -n 10 /tmp/containerd.log
-echo "--- containerd, cilium ---"
-grep cilium /tmp/containerd.log
-echo "--- stdout pod log ---"
+# Ordered by how much it matters and how fast it prints. All of this goes out
+# over a 115200-baud serial console, and catting a Cilium agent log is thousands
+# of lines and takes minutes -- anything queued behind that never gets printed
+# before the run is given up on, which is why these sections kept coming back
+# empty. Grep the big logs, cat the small ones, and put the markers first
+# because the harness greps the console for them while the run is still going.
+echo "--- markers ---"
+cat /var/log/k4s-smoke/result
+cat /var/log/k4s-netns/result
+cat /var/log/k4s-ds/result
+cat /var/log/k4s-deploy/result
+echo "--- cni plugin log ---"
+ls /var/run/cilium/
+cat /var/run/cilium/cilium-cni.log
+echo "--- cni config on disk ---"
+ls -la /etc/cni/net.d
+echo "--- cni binaries ---"
+ls /opt/cni/bin
+echo "--- kubelet, the netns pod ---"
+grep k4s-netns /tmp/kubelet.log | tail -15
+echo "--- kubelet log, last 20 ---"
+tail -n 20 /tmp/kubelet.log
+echo "--- containerd, cni and sandbox ---"
+grep -iE 'cni|sandbox' /tmp/containerd.log | tail -15
+echo "--- the agent log, errors and warnings ---"
+grep -E 'level=(error|fatal|warn)' /var/log/pods/*cilium-*/cilium-agent/*.log | tail -18
+echo "--- the agent log, last 12 ---"
+tail -n 12 /var/log/pods/*cilium-*/cilium-agent/*.log
+echo "--- the operator log, errors and warnings ---"
+grep -E 'level=(error|fatal|warn)' /var/log/pods/*cilium-operator-*/*/*.log | tail -12
+echo "--- the stdout pod ---"
 cat /var/log/pods/*k4s-log*/log/*.log
 echo "--- flannel log ---"
 cat /var/log/k4s-flannel/flannel.log
-cat /var/log/pods/*k4s-log*/log/*.log
-echo "--- agent log ---"
-ls /var/log/pods
-ls /var/log/pods/*cilium*/
-cat /var/log/pods/*cilium-*/cilium-agent/*.log
-echo "--- operator log ---"
-cat /var/log/pods/*cilium-operator-*/*/*.log
-echo "--- envoy log ---"
-cat /var/log/pods/*cilium-envoy-*/*/*.log
-echo "--- cilium images ---"
-ctr -n k8s.io images ls
-echo "--- the agent log dir ---"
-ls -la /var/log/pods/*cilium-*/cilium-agent/
 echo "--- the agent, run by hand ---"
 # No Kubernetes in the way: if the binary cannot start, this is where it says
 # so. The CRI stores images by digest, so the tag alone is not enough.
 D=2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01
 I=quay.io/cilium/cilium@sha256:$D
 ctr -n k8s.io run --rm --privileged --net-host $I t cilium-agent --version
-echo "--- the agent, run by hand, with the chart's args ---"
-ctr -n k8s.io run --rm --privileged --net-host $I t agent2 cilium-agent --config-dir=/tmp/cilium/config-map
 
 echo "K4S_CHECK_END"
 poweroff

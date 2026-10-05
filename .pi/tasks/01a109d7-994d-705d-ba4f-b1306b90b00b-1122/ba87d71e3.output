@@ -6,3 +6,6 @@ CONFIG_NFT_COMPAT=y
 CONFIG_NETFILTER_XTABLES=y
 CONFIG_CGROUP_NET_CLASSID=y
 --- options that did NOT take (the silent-drop trap) ---
+make[1]: Leaving directory '/home/ganshun/k4s/build/kernel-cni'
+make: Leaving directory '/home/ganshun/k4s/linux'
+-rw-rw-r-- 1 ganshun ganshun 4535296 Oct  5 12:40 build/kernel-cni/arch/x86/boot/bzImage
