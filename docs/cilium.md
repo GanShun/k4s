@@ -91,8 +91,11 @@ directory, so that bind mount has no source and the agent pod cannot be created.
 The fix is one `mkdir` in the image, but it is a hard blocker as things stand,
 and it would bite any DaemonSet that mounts modules.
 
-## Blocker 3: two images to pull on every boot
+## Not a blocker: pulling two images on every boot
 
+**Decided (2026-10-05): pulling on boot is fine.** The images are pinned by
+digest and re-pulled like every other image the node uses, rather than being
+baked into the initramfs. Recorded here only so the boot cost is not a surprise.
 Measured from the registry for v1.20.2, amd64:
 
 | Image | Compressed layers |
@@ -100,12 +103,8 @@ Measured from the registry for v1.20.2, amd64:
 | `quay.io/cilium/cilium` | 245.9 MiB |
 | `quay.io/cilium/operator` | 47.1 MiB |
 
-Strict RAM-only means both are re-pulled into RAM on every boot, and expanded in
-the containerd content store. That is a new, recurring boot cost and a new
-dependency on reaching the registry. The alternative is baking them into the
-initramfs, which adds roughly 250 MiB to a 213 MiB image but is pinned and works
-offline — which is arguably more in keeping with how everything else here is
-pinned. Worth deciding deliberately rather than by default.
+That is ~293 MiB to pull and expand in RAM per boot, on top of whatever the
+workload pulls.
 
 ## Blocker 4: the throwaway control plane cannot run a DaemonSet
 
@@ -172,6 +171,11 @@ second is much less work and is enough to exercise the datapath.
 
 ## Suggested order, if we do this
 
+0. **Make a container actually enter the pod's network namespace.** Nothing
+   below is meaningful until it does: the CRI hands net/ipc/uts to the container
+   by path and the cgo-free runc ignores them, so a pod with a CNI address still
+   runs in the host's namespaces. See "what is not covered" in
+   `docs/nsenter-and-runc.md`.
 1. **Decide whether the kernel may grow**, and price it with a separate fragment
    before anything else. Everything below is cheap; this is the decision.
 2. `mkdir -p /lib/modules` in the image.
