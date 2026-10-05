@@ -4,7 +4,12 @@
 #
 # The console is a tty and u-root's gosh runs this one line at a time, so every
 # line must be a complete command: no multi-line blocks and no backslash
-# continuations. Fixed sleeps stand in for a poll loop.
+# continuations, and keep lines short -- the console drops characters on long
+# ones. Waits poll with a counter instead of sleeping a fixed budget.
+#
+# The bring-up is fed rather than baked into the image because gosh reads a file
+# one line at a time too, and a file-read attempt lost a redirect and a trailing
+# `&` on a long line. See docs/testing.md.
 #
 # The kubeconfig at /etc/kubernetes/kubeconfig is spliced in by
 # scripts/test-cluster.sh, which issues it from the throwaway CA.

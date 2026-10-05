@@ -19,8 +19,23 @@ seccomp filter, and all of it survives a **reboot**. That last part is the whole
 point of a diskless node: it must come back from nothing.
 
 Both are `K4S_CNI`-parameterised. `flannel` is the default; `cilium` renders
-Cilium's chart with `helm template` and applies that instead. Cilium needs a
-different kernel (see below), which is the one rough edge in the story.
+Cilium's chart with `helm template` and applies that instead. One kernel runs
+either: `make kernel` applies both fragments, so the two cluster tests differ only
+in what they install on the node.
+
+**`make test-all`** runs all three, in order of increasing cost. From a fresh
+checkout that is the whole story — `make linux` clones the pinned kernel checkout
+and `DIT` fetches everything else. Roughly: 2 minutes for `make test`, 75 seconds
+for two flannel boots, 210 seconds for two Cilium boots, whose agent has to
+install itself before the node can become Ready at all.
+
+One caveat, recorded because it is real rather than because it is understood. The
+Cilium leg has been seen to fail at the end of its second boot with exit 255 and
+no message at all — under `make test-all`, and not when the same leg is driven
+directly. It is intermittent, and it has not yet been reproduced with a trace
+attached. `K4S_XTRACE=1` (see `CLAUDE.md`) is how to catch it: the harness's `ERR`
+trap does not fire for an explicit exit or a signal, so a trace of the run is the
+only instrument that will say where it goes.
 
 ## How a cluster test runs
 
@@ -29,41 +44,35 @@ because the split is deliberate.
 
 | | What it is | What it does |
 | --- | --- | --- |
-| `scripts/test-cluster.sh` (~900 lines) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
+| `scripts/test-cluster.sh` (1035 lines, 30 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
 | `scripts/controlplane-boot.sh` (73) | the control plane VM's own script | starts etcd, kube-apiserver, kube-controller-manager, kube-scheduler |
-| `configs/node/uinit.sh` (88) | the node's own bring-up, **in the image** | network, mounts, cgroups, containerd, kubelet — and nothing else |
+| `scripts/cluster-check.sh` (105) | the node's bring-up, piped into the guest's `gosh` | network, mounts, cgroups, containerd, kubelet — and nothing else |
 
-### The node brings itself up
+### The node's bring-up is a script fed to the guest
 
-The last row is not a test script. It is installed by `DIT` as `/bin/uinit`, and
-u-root's init runs it: `libinit.RunCommands` walks `/inito`, `/bbin/uinit`,
-`/bin/uinit`, `/buildbin/uinit`, `/bin/defaultsh`, `/bin/sh`, running each that
-exists and waiting for it to exit. So `uinit.sh` starts the daemons in the
-background and returns, and init falls through to a shell afterwards.
+The last row is not a test script in the sense the others are — it is the node's
+bring-up, and it is fed into the guest's shell over the serial console one line
+at a time, with stdin held open afterwards so `gosh` does not see EOF and exit.
+Holding it open is what keeps the shell alive, which is what keeps the daemons
+started with a plain `&` alive: no `nohup` is used, because nothing is left to
+send the HUP.
 
-That is worth stating plainly because it used to be the opposite: the harness
-piped the node's bring-up into the guest's shell over the serial console. Every
-failure in the "Lessons" section below traces back to that, and the fix was to
-stop feeding a console at all — a file in the image cannot be corrupted in
-transit, and a file read over ssh does not care when it is read.
+`gosh` is not bash, and that constraint is the reason this is a flat script and
+not anything nicer: every line must be a complete command, with no multi-line
+blocks and no backslash continuations, and it has to stay short because the
+console drops characters on long lines.
 
-The guest script is gone entirely (`scripts/cluster-check.sh`). Nothing about the
-node's bring-up is test-only any more, which is where it belongs: a diskless node
-that cannot mount its own cgroups is not a diskless node.
+The obvious better shape is for the node to bring itself up from a file in the
+image rather than being fed over a console. That was tried and **reverted**, and
+the reason is worth keeping: `gosh` reads a file one line at a time too, and a
+157-character line did not survive being read from a file — the redirect and the
+trailing `&` were lost — and background jobs started without `nohup` die with the
+shell, so kubelet never survived. The two faults concealed each other. A **Go**
+`uinit` would have neither problem, and is the way to do it if it is tried again.
 
-One consequence worth knowing: u-root's init waits for `uinit` and then starts a
-shell, so the shell that started the daemons **exits** a second later. Processes
-in that session can get SIGHUP when it does, which would take containerd and
-kubelet down with it — the symptom being a node that boots, prints
-`containerd: ok`, and then never registers, with empty logs. They are started
-under `nohup` to guard against that.
-
-That guard is defensive rather than confirmed. A clean boot of this image showed
-sshd and containerd both alive over ssh for 80 seconds, but the image already had
-`nohup` in it, so the test does not distinguish; and Go programs ignore SIGHUP by
-default, which argues it was never the cause. The node-not-registering failures
-that prompted it are now attributed to something much more mundane — several
-harnesses running at once and killing each other's control planes.
+There is a second thing worth knowing about the fed shape: the guest does not
+decide when it is finished. The harness holds stdin open and stops the VM itself,
+so the guest cannot power off while the harness is still applying pods.
 
 ### How the pods are deployed
 
@@ -203,10 +212,21 @@ loaded at init: flannel's plugin (`failed to load flannel 'subnet.env'`), or
 nothing at all.
 
 The fix is a check, not a workaround: `run_cilium` waits until the node's
-`/etc/cni/net.d` contains Cilium's conflist and no longer contains flannel's
-before returning. Pre-placing the conflist in the image also "worked", and was
-wrong — Cilium writes its own and containerd picks it up, exactly as on any other
-node. That was confirmed by removing the pre-seed and watching the test pass.
+`/etc/cni/net.d` contains Cilium's conflist before returning. Pre-placing the
+conflist in the image also "worked", and was wrong — Cilium writes its own and
+containerd picks it up, exactly as on any other node. That was confirmed by
+removing the pre-seed and watching the test pass.
+
+The check itself was wrong twice, which is worth recording because it looked
+right and failed in a way that pointed at Cilium rather than at the check. It
+required flannel's conflist to be *gone*, and matched it with a plain substring
+grep. But Cilium runs with `--cni-exclusive` and that **renames** the other
+conflists to `<name>.cilium_bak` rather than deleting them — so the substring
+matched the backup, the condition could never be satisfied, and the run reported
+"the agent is up but never wrote its CNI config" while the config sat right there.
+The requirement was also unnecessary: go-cni sorts the directory
+lexicographically, so `05-cilium` wins over `10-flannel` whether or not the
+latter is present. It now matches Cilium's own conflist as a whole line.
 
 ## Cilium's real cost on this node
 
@@ -269,16 +289,19 @@ the VMs are throwaway.
 **`scripts/cluster-check.sh` had drifted** — a duplicated `--- markers ---`
 section, a stale header comment about fixed sleeps, and a `--- cni logs ---`
 section that `cat`s whole logs to the serial console, the exact thing that was
-too slow. Done: the file is gone, superseded by `configs/node/uinit.sh`.
+too slow. Done: it was tidied, one markers block, no console log-catting, and
+poll loops instead of fixed sleeps. It is still fed over the console, which the
+section above explains.
 
-**The node's bring-up shape is dictated by gosh.** `uinit.sh` is a file in the
-image, so it cannot be corrupted in transit the way a console-fed script could —
-but gosh still reads it one line at a time, and its parsing is not bash's. Every
-line must be a complete command, with no multi-line blocks and no backslash
-continuations. The one that cost real time: **gosh accepts `A && B &` and then
+**The node's bring-up shape is dictated by gosh.** `scripts/cluster-check.sh` is
+fed to the guest one line at a time, and gosh's parsing is not bash's: every line
+must be a complete command, with no multi-line blocks and no backslash
+continuations, and lines have to stay short because the console drops characters
+on long ones. The bring-up belongs in the image instead, and that was tried and
+reverted — the section above has the two reasons.
+
+The one that cost real time, from that attempt: **gosh accepts `A && B &` and then
 does nothing with it.** kubelet was started that way, so it silently never ran,
 wrote no log, and the node never registered — and the absence of the log was the
 clue, since a shell creates a redirect target before it execs, so a missing
-`/tmp/kubelet.log` meant the line had never executed at all. A plain
-`nohup cmd ... &` on its own line works, which is why containerd and sshd were
-fine and only kubelet was missing.
+`/tmp/kubelet.log` meant the line had never executed at all.

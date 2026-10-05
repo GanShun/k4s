@@ -21,6 +21,7 @@ runc story, and `docs/cilium.md` for what choosing Cilium as the CNI would cost.
 
 ```
 make image     # build initramfs.cpio (runs ./DIT)
+make linux     # clone the pinned kernel checkout into linux/ (needs no root)
 make kernel    # configure + build linux/ into build/kernel/bzImage
 make run       # boot the image interactively under QEMU
 make test      # boot headless and run scripts/guest-check.sh
@@ -52,7 +53,8 @@ also why it is quick — around 75 seconds for two boots with flannel, and aroun
 210 with Cilium, whose agent has to install itself first.
 
 `make test-cluster-cni` needs **helm** to render Cilium's chart (`HELM=...` to
-point at one that is not on `PATH`); nothing else about the run differs.
+point at one that is not on `PATH`); nothing else about the run differs. It also
+sets `K4S_NODE_MEM=6144`, which it must: see the knobs table below.
 
 The control plane is a VM rather than host processes because a node should join
 something shaped like a real cluster: the controller-manager assigns pod CIDRs,
@@ -61,13 +63,39 @@ reaches its apiserver through a QEMU port forward on `127.0.0.1:6443`; the node
 reaches it at `10.0.2.2:6443`, which is the host from inside the node's
 user-mode network. Both are on the same certificate.
 
-Two prerequisites are **not** built by `make`:
+One prerequisite is **not** built by `make`:
 
-- `linux/` is a separate kernel checkout (gitignored). Clone it before
-  `make kernel`; `make kernel` uses it out-of-tree and never modifies it.
 - `DIT` is the only thing that clones the component sources, and `go.work`
   lists those modules. **A bare `go` command in the repo fails until `DIT` has
   run** (`cannot load module ../coredns ... no such file`). Run `./DIT` first.
+
+The kernel is not a prerequisite any more: `linux/` is a gitignored clone, and
+`make linux` fetches it pinned (Linux 7.2, `8d3ae592…`) and verifies the tag
+still points where it should. `make kernel` depends on it, so a fresh checkout
+plus `make test-all` is the whole story. `make kernel` uses the checkout
+out-of-tree and never modifies it.
+
+Knobs the harnesses honour, all optional:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `K4S_CNI` | `flannel` | `cilium` picks the Cilium leg |
+| `K4S_NODE_MEM` | `1536` | node RAM in MiB; Cilium needs `6144` |
+| `K4S_BOOTS` | `2` | boots per cluster run |
+| `K4S_BOOT_TIMEOUT` | `180` | seconds `make test` allows the guest |
+| `K4S_SSH_PORT` | `2222` | host port forwarded to the node's sshd |
+| `K4S_XTRACE` | unset | trace the cluster harness to a file |
+| `K4S_CILIUM_VERSION` | `1.20.2` | Cilium chart version |
+
+`K4S_NODE_MEM` is not a tuning knob. The node is RAM-only, so containerd's
+content store is a tmpfs and a tmpfs is half of RAM; Cilium's images need more
+than the default leaves them, and the failure surfaces as an agent that never
+becomes ready rather than as anything mentioning space.
+
+`K4S_XTRACE=1` sends the harness's stderr and a `set -x` trace to
+`/tmp/k4s-trace.log` (`K4S_XTRACE_FILE` to move it). A trace is the only reliable
+way to find a failure that arrives as a bare exit status: the harness's `ERR`
+trap does not fire for an explicit exit or a signal, and it has both.
 
 `/dev/kvm` decides the QEMU accelerator: KVM when writable, otherwise TCG
 (the scripts say so, and TCG is slow — raise `K4S_BOOT_TIMEOUT`).
@@ -116,12 +144,13 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `Makefile` | `image`/`kernel`/`run`/`test`/`test-cluster`/`test-cluster-cni`/`test-all` wrappers |
 | `configs/k4s-tiny.config` | Kernel fragment appended over `tinyconfig` |
 | `configs/k4s-cni.config` | Second kernel fragment, also always applied: what Cilium needs |
-| `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflists, pod manifests, and `uinit.sh` |
-| `configs/node/uinit.sh` | The node's own bring-up, installed as `/bin/uinit` and run by u-root's init |
+| `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflists, pod manifests |
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |
 | `scripts/controlplane-boot.sh` | Guest half of that test: the control plane VM's own boot |
+| `scripts/cluster-check.sh` | Guest half of that test: the node's own bring-up, fed to gosh |
+| `scripts/clone-linux.sh` | Clones the pinned kernel checkout for `make linux` |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/testing.md` | What the two tests are, how a cluster test runs, and what the
 harness cost to get working |
@@ -216,28 +245,27 @@ stdin. u-root's `gosh` treats a non-tty stdin as a script, so **every line of
 `guest-check.sh` must be a complete command** — no multi-line `if`/`for` blocks,
 and keep lines short enough not to wrap on the serial console.
 
-`make test-cluster` feeds the node **nothing**. The node brings itself up from
-`configs/node/uinit.sh`, which `DIT` installs as `/bin/uinit`: u-root's init runs
-`/inito`, `/bbin/uinit`, `/bin/uinit`, `/buildbin/uinit`, `/bin/defaultsh` and
-`/bin/sh` in sequence, waiting for each to exit, so a uinit that starts the
-daemons in the background and returns leaves the console at a shell afterwards.
-The harness then reads the results out of the node over **ssh**.
+`make test-cluster` feeds `scripts/cluster-check.sh` into the guest the same way,
+one line at a time with a small delay, and holds stdin open afterwards so `gosh`
+does not see EOF and exit -- which is what keeps the daemons it started with a
+plain `&` alive. The bring-up is fed rather than baked into the image, and it is
+a flat script for that reason: `gosh` reads it one line at a time and every line
+must be a complete command.
 
-`uinit.sh` is read by gosh one line at a time, and gosh is not bash. Every line
-must be a complete command — no multi-line blocks, no backslash continuations —
-and **`A && B &` is accepted and then does nothing at all**. That is how kubelet
-came to never start: the line was there, the node never registered, and the only
-clue was that `/tmp/kubelet.log` did not exist, which a shell would have created
-before exec'ing. Keep background launches on their own line as plain
-`nohup cmd ... &`.
+That is a deliberate step back from a `/bin/uinit` in the image that u-root's
+init would run. It is the better shape -- a node should bring itself up -- and it
+was tried and reverted: `gosh` reads a *file* one line at a time too, a
+157-character line lost its redirect and its trailing `&`, and background jobs
+started without `nohup` die with the shell, so kubelet never survived. The two
+faults concealed each other. A **Go** `uinit` would have neither problem and is
+the way to do it if it is tried again.
 
-That split is not cosmetic. Feeding a script to the serial console is fragile in
-three ways that all cost real time here: the console drops characters when handed
-a lot at once, so the script arrives corrupted and the guest stops partway
-through with no error; a log has to be printed at exactly the right moment to be
-caught at all; and printing one takes minutes at 115200 baud. A file in the image
-cannot be corrupted in transit, and a file read over ssh does not care when it is
-read. See `docs/testing.md`.
+The harness reads the results back over **ssh** (`collect`, `diag`), and that is
+the part that mattered. The console is only used to get the script *in*, never to
+get evidence *out*: it drops characters under load, a log has to be printed at
+exactly the right moment to be caught at all, and printing one takes minutes at
+115200 baud, while a file read over ssh takes a second and does not care when it
+is read. See `docs/testing.md`.
 
 The QEMU cmdline is
 `console=ttyS0,115200 panic=-1 cgroup_no_v1=all`. The last flag is not
