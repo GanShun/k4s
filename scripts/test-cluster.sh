@@ -725,7 +725,14 @@ run_cilium() {
 	K delete daemonset k4s-flannel -n kube-system --ignore-not-found >/dev/null 2>&1 || true
 	K apply -f "$CILIUM_YAML" >/dev/null
 	local i ready waiting lastwaiting=""
-	for i in $(seq 1 30); do
+	# Generous, because this covers pulling Cilium's images. The node is strictly
+	# RAM-only with no image cache, so every boot re-pulls about 300 MiB of them,
+	# and that takes minutes. Sixty seconds was enough to fail on a pull that was
+	# still in progress and reported as ImagePullBackOff only because it had not
+	# finished -- the fast-fail below is what catches a real pull failure, so
+	# waiting longer here costs nothing but time on a run that was going to fail
+	# anyway.
+	for i in $(seq 1 150); do
 		ready=$(K get daemonset cilium -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
 		if [ "${ready:-0}" = 1 ]; then
 			# The agent is ready before it has written its CNI config -- the
@@ -778,6 +785,11 @@ run_cilium() {
 		sleep 2
 	done
 	echo "cilium: FAILED (agent ready=${ready:-0})" >&2
+	# diag, because the interesting part of a failed pull is in the node's own
+	# kubelet log, and `describe` truncates the event text to the point of being
+	# useless. Without this a failed Cilium run says only that the agent was not
+	# ready, which is true of every possible cause.
+	diag
 	K get daemonset,deployment,pods -n kube-system -o wide 2>&1 | sed 's/^/  /' >&2
 	K describe pod -n kube-system -l k8s-app=cilium 2>&1 | tail -30 | sed 's/^/  /' >&2
 	return 1
