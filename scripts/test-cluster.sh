@@ -34,7 +34,7 @@
 # bounded. A fixed "kill it after N seconds" bound used to sit on top of that and
 # mostly served to hide the waits that were too long.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # Say where it died. Under `set -e` a failing command aborts the script with its
 # own status and no explanation, which is how a whole leg came to end in a bare
@@ -563,17 +563,42 @@ stop_guest() {
 # coming. That hung a whole run for fifteen minutes with no output at all, in
 # wait_ssh, which is called the moment the node boots.
 #
-# LogLevel=ERROR rather than -q, and no swallowing of the exit status: with -q a
-# dropped connection produced the same empty output as an empty file, which made
-# "the kubelet log is empty" and "ssh did not work" indistinguishable.
+# LogLevel=ERROR rather than -q, and a non-zero status reported rather than
+# swallowed: with -q a dropped connection produced the same empty output as an
+# empty file, which made "the kubelet log is empty" and "ssh did not work"
+# indistinguishable.
+#
+# The `if` is load-bearing and was the bug. `out=$(cmd); rc=$?` does not survive
+# `set -e`: when cmd fails the shell exits on the assignment and `rc=$?` never
+# runs, so the idiom written to *handle* a failure was defeated by the option
+# that makes failures fatal. In practice an ssh that failed with 255 killed the
+# whole harness at a point where the last line on stdout was "deployment: ok",
+# with no message, and the failing command was this one.
+#
+# Note also that an ERR trap is not inherited by shell functions unless `set -E`
+# is on, so the ERR trap above did not fire here either -- the diagnostic was
+# invisible at the one place it was needed. `set -Eeuo pipefail` fixes that; the
+# `if` here fixes this.
 guest_get() {
 	local out rc
-	out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
+	if out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
 		-o UserKnownHostsFile=/dev/null -o BatchMode=yes \
 		-o ConnectTimeout=5 -i "$SSH/client" -p "$SSH_PORT" \
-		root@127.0.0.1 "$@" 2>&1); rc=$?
+		root@127.0.0.1 "$@" 2>&1); then
+		rc=0
+	else
+		rc=$?
+	fi
 	if [ "$rc" = 124 ]; then
 		printf '(ssh to the node timed out)\n'
+		return 0
+	fi
+	if [ "$rc" != 0 ]; then
+		if [ -n "$out" ]; then
+			printf '(ssh to the node failed, rc=%s: %s)\n' "$rc" "$out"
+		else
+			printf '(ssh to the node failed, rc=%s, and said nothing)\n' "$rc"
+		fi
 		return 0
 	fi
 	printf '%s\n' "$out"
