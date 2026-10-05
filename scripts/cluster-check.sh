@@ -106,6 +106,8 @@ echo "--- agent log ---"
 ls /var/log/pods
 ls /var/log/pods/*cilium*/
 cat /var/log/pods/*cilium-*/cilium-agent/*.log
+echo "--- operator log ---"
+cat /var/log/pods/*cilium-operator-*/*/*.log
 echo "--- envoy log ---"
 cat /var/log/pods/*cilium-envoy-*/*/*.log
 echo "--- cilium images ---"

@@ -273,6 +273,61 @@ Cilium's datapath:
    not optional: **one library's default makes it a startup requirement for the
    agent.** The fix is `CONFIG_XFRM_USER=y`, which registers the family.
 
+6. **The operator elected itself leader and then did nothing.** With
+   `ipam.mode=cluster-pool` the operator is supposed to allocate pod CIDRs to
+   `CiliumNode` objects. It logged "Leading the operator HA deployment", created
+   its CRDs, and stopped there — no IPAM activity, no errors. The agent, waiting
+   for its CIDR, sat at `required IPv4 PodCIDR not available` and never became
+   ready, and the CiliumNode stayed at `{"pools":{}}`.
+
+   The cluster-pool mode is not needed here. The controller-manager already runs
+   with `--allocate-node-cidrs=true`, so the **k8s Node** has
+   `spec.podCIDR: 10.244.0.0/24` — the same mechanism the flannel DaemonSet used.
+   `ipam.mode=kubernetes` reads exactly that, and the CiliumNode immediately
+   became `{"podCIDRs":["10.244.0.0/24"],"pools":{}}`. (Whether the operator's
+   IPAM controller can be made to run is a separate question; it is not needed
+   for this node.)
+
+7. **The agent requires a BPF helper the kernel does not compile in.** With a
+   CIDR it got further and stopped at:
+
+   ```
+   error="requirements failed: Require support for bpf_get_cgroup_classid() (Linux 5.7.0 or newer)"
+   ```
+
+   The helper exists only when `CONFIG_CGROUP_NET_CLASSID` is set, so a traffic
+   class feature that sounds optional is a hard startup requirement. The
+   fragment now sets it. (Note the message blames the kernel version; the kernel
+   here is 7.2.0. The version is a proxy for the helper probe.)
+
+8. **iptables: the binary is present, and the kernel refuses it.** The agent's
+   iptables reconciler then failed with:
+
+   ```
+   cannot add custom chain CILIUM_INPUT: unable to add CILIUM_INPUT chain:
+   (unable to run 'iptables -t filter -N CILIUM_INPUT'
+    iptables command: exit status 4
+    stderr="iptables v1.8.8 (nf_tables): TABLE_ADD failed (Operation not supported)")
+   ```
+
+   Read that carefully, because it answers the go-iptables question with evidence
+   rather than argument. Cilium's **own image ships `iptables v1.8.8`**, so
+   `exec.LookPath` finds a binary and `coreos/go-iptables` would happily exec it.
+   The failure is `TABLE_ADD failed` — **the kernel** refusing to create the
+   table. No userspace library, in Go or otherwise, can fix that.
+
+   The specific mismatch is the backend: the image's iptables is the **nftables**
+   one (`nf_tables`), while this fragment had priced only the **legacy** tables
+   (`IP_NF_IPTABLES_LEGACY`, `NETFILTER_XTABLES_LEGACY`, ...). So `CONFIG_NF_TABLES`
+   and `CONFIG_NFT_COMPAT` are added. The alternative — pointing Cilium at
+   `iptables-legacy` — needs no kernel change, and is the cheaper experiment if
+   the nft path disappoints.
+
+9. **Still open: the BPF alignchecker is OOM-killed.**
+   `Failed to compile bpf_alignchecker.o: signal: killed` — `signal: killed` is
+   the OOM killer, so this is a memory or rlimit matter inside the agent
+   container rather than a kernel feature. It has not been chased yet.
+
 What is *not* the problem, having checked: image pulls are fast (Cilium's image
 came in 9 seconds), seccomp (the chart marks the agent Unconfined, and the
 operator runs under `RuntimeDefault` without trouble), memory (6 GB was plenty),

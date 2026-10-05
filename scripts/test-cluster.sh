@@ -349,11 +349,33 @@ build_cilium() {
 		--untar --untardir "$CP/charts" >/dev/null
 	"$HELM" template cilium "$CP/charts/cilium" --namespace kube-system \
 		--set k8sServiceHost=10.0.2.2 --set k8sServicePort="$PORT" \
-		--set 'ipam.operator.clusterPoolIPv4PodCIDRList[0]=10.244.0.0/16' \
-		--set ipam.operator.clusterPoolIPv4MaskSize=24 \
+		--set ipam.mode=kubernetes \
 		--set operator.replicas=1 \
 		--set hubble.enabled=false --set hubble.relay.enabled=false \
 		--set hubble.ui.enabled=false > "$CILIUM_YAML"
+
+	# Drop the agent's postStart hook. Its only job is deleting iptables rules
+	# left behind by the AWS VPC CNI plugin, which this node has never run: on
+	# any non-AWS node it is a no-op. It fails here regardless, because it opens
+	# with `iptables-save | grep -c` under `set -o errexit` and this node has no
+	# iptables at all -- and a failed postStart hook makes the kubelet kill the
+	# container. That is what made the agent exit 2 with an empty log while the
+	# binary itself runs fine. See docs/cilium.md.
+	python3 - "$CILIUM_YAML" <<-'PY'
+	import sys
+	path = sys.argv[1]
+	out, skipping, removed = [], False, 0
+	for line in open(path):
+	    if line.rstrip("\n") == "          postStart:":
+	        skipping, removed = True, removed + 1
+	        continue
+	    if skipping and line.rstrip("\n") == "          preStop:":
+	        skipping = False
+	    if not skipping:
+	        out.append(line)
+	assert removed == 1, f"expected one postStart hook, removed {removed}"
+	open(path, "w").writelines(out)
+	PY
 }
 
 # --- node image -------------------------------------------------------------

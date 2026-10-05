@@ -1,0 +1,6 @@
+CONFIG_XFRM=y
+CONFIG_XFRM_USER=y
+Kernel: arch/x86/boot/bzImage is ready  (#2)
+make[1]: Leaving directory '/home/ganshun/k4s/build/kernel-cni'
+make: Leaving directory '/home/ganshun/k4s/linux'
+-rw-rw-r-- 1 ganshun ganshun 4527104 Oct  5 12:32 build/kernel-cni/arch/x86/boot/bzImage

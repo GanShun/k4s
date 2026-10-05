@@ -1,0 +1,28 @@
+{
+  "id": "b61b76421",
+  "name": "Rebuild Cilium kernel with XFRM",
+  "command": "cd /home/ganshun/k4s && export PATH=/tmp/dwarves-root/usr/bin:$PATH && make -C linux O=$PWD/build/kernel-cni tinyconfig >/dev/null && cat configs/k4s-tiny.config configs/k4s-cni.config >> build/kernel-cni/.config && make -C linux O=$PWD/build/kernel-cni olddefconfig >/dev/null 2>&1 && grep -E '^CONFIG_(XFRM|XFRM_USER)=' build/kernel-cni/.config && make -C linux O=$PWD/build/kernel-cni -j$(nproc) bzImage 2>&1 | tail -3 && ls -l build/kernel-cni/arch/x86/boot/bzImage",
+  "status": "completed",
+  "outputPath": ".pi/tasks/01a109d7-994d-705d-ba4f-b1306b90b00b-1122/b61b76421.output",
+  "cwd": "/home/ganshun/k4s",
+  "startTime": 1791203468236,
+  "endTime": 1791203576880,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 1412684,
+  "bytesWritten": 281,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 900,
+  "shellPolicy": {
+    "policy": "inherit",
+    "executable": "/bin/bash",
+    "argvPrefix": [
+      "-c"
+    ],
+    "dialect": "bash"
+  }
+}
