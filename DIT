@@ -49,7 +49,7 @@ FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (p
 # tree still builds, and the revision that goes into the image is printed either
 # way. Everything else here is pinned strictly.
 RUNC_REPO=https://github.com/GanShun/runc.git
-RUNC_REF=7215222c9889492765139ba8393fa1ea3cdae256  # purego-seccomp, 2026-10-04
+RUNC_REF=d8fe9e94fe4b6bdced1cf1d2f3ea325a896322ea  # purego-seccomp, 2026-10-05
 
 KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
 KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8

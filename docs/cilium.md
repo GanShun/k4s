@@ -171,11 +171,11 @@ second is much less work and is enough to exercise the datapath.
 
 ## Suggested order, if we do this
 
-0. **Make a container actually enter the pod's network namespace.** Nothing
-   below is meaningful until it does: the CRI hands net/ipc/uts to the container
-   by path and the cgo-free runc ignores them, so a pod with a CNI address still
-   runs in the host's namespaces. See "what is not covered" in
-   `docs/nsenter-and-runc.md`.
+0. ~~**Make a container actually enter the pod's network namespace.**~~
+   **Done (2026-10-05).** The init process joins namespaces given by path
+   itself, so a pod with a CNI address really runs in its own netns; flannel
+   proved it and `make test-cluster` asserts the container's own view of its
+   interface. See "what is not covered" in `docs/nsenter-and-runc.md`.
 1. **Decide whether the kernel may grow**, and price it with a separate fragment
    before anything else. Everything below is cheap; this is the decision.
 2. `mkdir -p /lib/modules` in the image.
