@@ -133,9 +133,31 @@ cp_down() {
 			rm -f "$CP/$p.pid"
 		fi
 	done
-	pkill -f "$CP/kube-apiserver" 2>/dev/null || true
-	pkill -f "$CP/etcd" 2>/dev/null || true
+	kill_binaries
 	sleep 1
+}
+
+# Kill anything still running out of $CP that the pid files did not account for,
+# which is what an interrupted run leaves behind.
+#
+# This matches /proc/<pid>/exe rather than the command line. `pkill -f
+# build/controlplane/etcd` matches *any* process whose command line merely
+# mentions that path, and the caller of this script is such a process as soon as
+# it is wrapped in something like `bash -c '... build/controlplane/etcd ...'`,
+# so it killed its own caller. Matching the executable cannot do that.
+kill_binaries() {
+	local target pid exe
+	for target in "$CP/kube-apiserver" "$CP/etcd"; do
+		target=$(readlink -f "$target" 2>/dev/null) || continue
+		for pid in /proc/[0-9]*; do
+			pid=${pid#/proc/}
+			exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || continue
+			# A binary replaced while running reports as "<path> (deleted)".
+			if [ "${exe% (deleted)}" = "$target" ]; then
+				kill "$pid" 2>/dev/null || true
+			fi
+		done
+	done
 }
 
 wait_apiserver() {
