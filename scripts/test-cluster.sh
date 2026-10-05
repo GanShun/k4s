@@ -281,7 +281,7 @@ cp_up() {
 	# port forward is how both the host and the node reach the apiserver: the
 	# host at 127.0.0.1:6443, and the node at 10.0.2.2:6443, which is the host
 	# from inside the node's user-mode network.
-	( cat "$CP_GUEST"; sleep $((BOOT_TIMEOUT + 60)) ) | \
+	cat "$CP_GUEST" | feed_guest "$CP/controlplane.pid" | \
 		qemu-system-x86_64 -M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
 			-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:$PORT \
 			-device virtio-net-pci,netdev=n0 \
@@ -369,13 +369,26 @@ boot() {
 			printf 'rm -f /etc/cni/net.d/10-flannel.conflist\n'
 		fi
 		cat "$GUEST"
-		sleep $((BOOT_TIMEOUT + 60))
-	} | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
+	} | feed_guest "$CP/qemu.pid" | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
 			-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 			-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
 			-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
 			-nographic -no-reboot > "$CP/boot$n.log" 2>&1 &
 	echo $! > "$CP/qemu.pid"
+}
+
+# Feed the guest its script, then hold stdin open until the VM is gone: gosh
+# treats a closed stdin as end of script and would exit before the guest has
+# finished. The point is that it must not outlive the VM. Sleeping a fixed
+# BOOT_TIMEOUT + 60 here instead leaves the pipeline -- and therefore anything
+# that waits for it, including this script's own exit -- alive for up to eleven
+# minutes after the guest has powered off, which is dead time on every run.
+feed_guest() {
+	local pidfile=$1
+	cat
+	while [ ! -s "$pidfile" ] || kill -0 "$(cat "$pidfile")" 2>/dev/null; do
+		sleep 1
+	done
 }
 
 wait_qemu() {

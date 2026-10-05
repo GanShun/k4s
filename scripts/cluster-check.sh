@@ -110,6 +110,16 @@ echo "--- envoy log ---"
 cat /var/log/pods/*cilium-envoy-*/*/*.log
 echo "--- cilium images ---"
 ctr -n k8s.io images ls
+echo "--- the agent log dir ---"
+ls -la /var/log/pods/*cilium-*/cilium-agent/
+echo "--- the agent, run by hand ---"
+# No Kubernetes in the way: if the binary cannot start, this is where it says
+# so. The CRI stores images by digest, so the tag alone is not enough.
+D=2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01
+I=quay.io/cilium/cilium@sha256:$D
+ctr -n k8s.io run --rm --privileged --net-host $I t cilium-agent --version
+echo "--- the agent, run by hand, with the chart's args ---"
+ctr -n k8s.io run --rm --privileged --net-host $I t agent2 cilium-agent --config-dir=/tmp/cilium/config-map
 
 echo "K4S_CHECK_END"
 poweroff
