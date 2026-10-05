@@ -53,6 +53,15 @@ FLANNEL_DS=$CONFIGS/flannel-ds.yaml
 DEPLOY=$CONFIGS/deploy-pod.yaml
 BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-240}
 BOOTS=${K4S_BOOTS:-2}
+# flannel is the default because it needs nothing from the kernel that this one
+# lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
+# kernel built with configs/k4s-cni.config and a great deal more memory, so the
+# node VM is given more room there.
+CNI=${K4S_CNI:-flannel}
+NODE_MEM=${K4S_NODE_MEM:-1536}
+CILIUM_VERSION=${K4S_CILIUM_VERSION:-1.20.2}
+HELM=${HELM:-helm}
+CILIUM_YAML=$CP/cilium.yaml
 
 ACCEL=()
 [ -w /dev/kvm ] && ACCEL=(-enable-kvm -cpu host)
@@ -295,6 +304,29 @@ cp_up() {
 	echo "apiserver: ok (in the control plane VM, with a scheduler)"
 }
 
+# --- Cilium -----------------------------------------------------------------
+# The manifest is rendered from Cilium's chart rather than taken from a release
+# asset, because it has to be told things: which apiserver to talk to (there is
+# no service routing on this node, so the ClusterIP is a black hole) and which
+# addresses to hand out. helm template renders it; the chart is pinned by
+# version, and the images it names are pinned by digest already.
+build_cilium() {
+	[ "$CNI" = cilium ] || return 0
+	log "rendering the Cilium $CILIUM_VERSION manifest"
+	# helm pull --untar refuses to overwrite, so the chart from a previous run has
+	# to go first.
+	rm -rf "$CP/charts/cilium"
+	"$HELM" pull cilium --version "$CILIUM_VERSION" --repo https://helm.cilium.io \
+		--untar --untardir "$CP/charts" >/dev/null
+	"$HELM" template cilium "$CP/charts/cilium" --namespace kube-system \
+		--set k8sServiceHost=10.0.2.2 --set k8sServicePort="$PORT" \
+		--set 'ipam.operator.clusterPoolIPv4PodCIDRList[0]=10.244.0.0/16' \
+		--set ipam.operator.clusterPoolIPv4MaskSize=24 \
+		--set operator.replicas=1 \
+		--set hubble.enabled=false --set hubble.relay.enabled=false \
+		--set hubble.ui.enabled=false > "$CILIUM_YAML"
+}
+
 # --- node image -------------------------------------------------------------
 splice_image() {
 	log "splicing the node kubeconfig into $NODE_IMAGE"
@@ -308,8 +340,18 @@ boot() {
 	local n=$1
 	log "booting the node image (run $n/$BOOTS)"
 	# Hold stdin open past the script so gosh does not see EOF and exit.
-	( cat "$GUEST"; sleep $((BOOT_TIMEOUT + 60)) ) | \
-		qemu-system-x86_64 -M q35 -m 1536 -smp 2 "${ACCEL[@]}" \
+	{
+		# Cilium's DaemonSet mounts /lib/modules unconditionally, and this image
+		# has no modules and so no such directory. It also installs its own CNI
+		# config, so the flannel one has to go or two conflists would be on disk
+		# and the CRI loads only the first.
+		if [ "$CNI" = cilium ]; then
+			printf 'mkdir -p /lib/modules\n'
+			printf 'rm -f /etc/cni/net.d/10-flannel.conflist\n'
+		fi
+		cat "$GUEST"
+		sleep $((BOOT_TIMEOUT + 60))
+	} | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
 			-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 			-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
 			-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
@@ -327,6 +369,21 @@ wait_qemu() {
 		sleep 1
 	done
 	kill "$pid" 2>/dev/null || true
+}
+
+# Wait only for the Node object, not for it to be Ready. When the CNI installs
+# its own config -- Cilium does -- the node cannot become Ready until that has
+# happened, so waiting for Ready before applying the CNI is a deadlock: nothing
+# would ever run the DaemonSet that makes the node Ready.
+wait_node_exists() {
+	local i
+	for i in $(seq 1 90); do
+		if K get node "$NODE" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 2
+	done
+	return 1
 }
 
 wait_node() {
@@ -387,6 +444,36 @@ run_netns_pod() {
 # running: it writes the subnet file the CNI plugin reads, and nothing with a
 # network namespace of its own can start before that. It is hostNetwork, so it
 # needs no CNI to start itself.
+run_cni() {
+	if [ "$CNI" = cilium ]; then
+		run_cilium
+		return
+	fi
+	run_flannel
+}
+
+# Cilium installs its own CNI config, so the node's /etc/cni/net.d starts empty
+# and the CRI reports NetworkReady=false until the agent writes it. That is why
+# the node only becomes Ready after this DaemonSet is up, and why the agent has
+# to be hostNetwork.
+run_cilium() {
+	log "applying Cilium"
+	K apply -f "$CILIUM_YAML" >/dev/null
+	local i ready
+	for i in $(seq 1 240); do
+		ready=$(K get daemonset cilium -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
+		if [ "${ready:-0}" = 1 ]; then
+			echo "cilium: ok (the agent is running on the node)"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "cilium: FAILED (agent ready=${ready:-0})" >&2
+	K get daemonset,deployment,pods -n kube-system -o wide 2>&1 | sed 's/^/  /' >&2
+	K describe pod -n kube-system -l k8s-app=cilium 2>&1 | tail -30 | sed 's/^/  /' >&2
+	return 1
+}
+
 run_flannel() {
 	log "applying the flannel DaemonSet"
 	# flanneld exits rather than retrying when it cannot take a subnet lease, and
@@ -505,6 +592,7 @@ check_marker() {
 build_control_plane
 gen_pki
 build_controlplane_image
+build_cilium
 cp_up
 splice_image
 
@@ -515,15 +603,24 @@ cleanup() {
 trap cleanup EXIT
 
 boot 1
-if ! wait_node; then
+if ! wait_node_exists; then
 	echo "node did not register" >&2
 	tail -30 "$CP/boot1.log" >&2
 	exit 1
 fi
+echo "node: ok (registered)"
+# The CNI goes on before waiting for Ready, not after: Cilium installs its own
+# CNI config, so the node stays NotReady (NetworkReady=false) until the agent is
+# running, and the agent is a DaemonSet that only exists once the node does.
+run_cni
+if ! wait_node; then
+	echo "node never became Ready" >&2
+	K get node "$NODE" -o wide 2>&1 | sed 's/^/  /' >&2
+	K get pods -A -o wide 2>&1 | sed 's/^/  /' >&2
+	tail -30 "$CP/boot1.log" >&2
+	exit 1
+fi
 echo "node: ok (registered and Ready)"
-# flannel first: everything below that asks for its own network namespace needs
-# the subnet file it writes. The smoke pod is hostNetwork and would not care.
-run_flannel
 # Both pods go on together: one hostNetwork, one asking for a CNI, which
 # together are the whole statement about this node's networking.
 run_pod
@@ -535,15 +632,21 @@ check_marker "$CP/boot1.log"
 for n in $(seq 2 "$BOOTS"); do
 	log "reboot: same node image, it must rejoin and the pod must come back"
 	boot "$n"
-	if ! wait_node; then
+	if ! wait_node_exists; then
 		echo "node did not rejoin" >&2
 		tail -30 "$CP/boot$n.log" >&2
 		exit 1
 	fi
 	echo "node: ok (rejoined)"
 	# The DaemonSet object outlived the reboot, so its pod comes back on its own;
-	# this waits for it before the pods that need the CNI.
-	run_flannel
+	# this waits for it, and for the node to be Ready again, before the pods that
+	# need the CNI.
+	run_cni
+	if ! wait_node; then
+		echo "node never became Ready after the reboot" >&2
+		tail -30 "$CP/boot$n.log" >&2
+		exit 1
+	fi
 	run_pod
 	# The pod objects outlived the reboot, so the controllers recreate them on
 	# their own; this waits for them and re-checks the addresses the CNI hands

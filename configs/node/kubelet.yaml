@@ -13,3 +13,9 @@ resolvConf: /etc/resolv.conf
 # RuntimeDefault rather than weakening it. (The KubeletConfiguration field is a
 # bool; the CLI flag is a string.)
 seccompDefault: true
+# No filesystem eviction. Everything the runtime writes is RAM, so kubelet's
+# ephemeral-storage accounting sees the node fill up whenever an image is pulled
+# and starts evicting pods to reclaim a disk that does not exist -- which is
+# exactly what happened when Cilium's images went in. Memory is still watched.
+evictionHard:
+  memory.available: 200Mi

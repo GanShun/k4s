@@ -181,6 +181,48 @@ second is much less work and is enough to exercise the datapath.
   datapath state in kernel maps. A reboot loses the maps and the agent rebuilds
   them. That is compatible with strict RAM-only rather than fighting it.
 
+## First attempt, 2026-10-05: what actually broke
+
+Cilium was run against the node with the kernel above, and the harness grew a
+`K4S_CNI=cilium` mode that renders Cilium's chart with `helm template` (the
+release manifest is not in the repository), telling it the apiserver's address
+via `k8sServiceHost` and giving it `10.244.0.0/16` to allocate from.
+
+It got as far as: the operator running, the CRDs created, the agent's
+initContainers all succeeding. Then the agent itself crash-looped. Three things
+came out of it, two of which are the node's fault and neither of which is about
+Cilium's datapath:
+
+1. **`/` was not a shared mount.** containerd refused to create Cilium's
+   `mount-bpf-fs` initContainer at all: *"path \"/sys/fs/bpf\" is mounted on
+   \"/sys\" but it is not a shared mount"*. A container that mounts something
+   and expects the host to see it needs the mount to propagate, and every
+   distribution's init makes `/` shared. u-root's does not, so the node has to:
+   `mount -t none -o shared,rec none /`. Two traps in that one line — no
+   `remount`, because the kernel checks `MS_REMOUNT` before the propagation
+   flags, and `-t none`, because without a type u-root's mount tries to open the
+   source as a block device instead of calling `mount(2)`.
+
+2. **kubelet's filesystem eviction thrashes on a RAM-only node.** Pulling
+   Cilium's images fills containerd's RAM-backed content store, kubelet's
+   eviction manager decides it must reclaim ephemeral storage, ranks the Cilium
+   pods for eviction, cannot evict them because they are critical, and loops
+   forever. The node never settles. There is no disk to reclaim on a diskless
+   node, so filesystem eviction is off in `configs/node/kubelet.yaml` and only
+   memory is watched.
+
+3. **Container logs are empty.** Every Cilium pod's log file exists and is
+   empty, including the operator's, which is running happily and certainly
+   printed something. That is not a Cilium problem either: it means the node is
+   not capturing container output, which is worth chasing on its own. It is also
+   why the agent's crash is still unexplained — there is nothing to read. (A
+   guess worth testing: the shim's log fifo.)
+
+What is *not* the problem, having checked: image pulls are fast (Cilium's image
+came in 9 seconds), seccomp (the chart marks the agent Unconfined, and the
+operator runs under `RuntimeDefault` without trouble), the kernel fragment (no
+feature complaints), and memory (6 GB was plenty).
+
 ## Suggested order, if we do this
 
 0. ~~**Make a container actually enter the pod's network namespace.**~~
