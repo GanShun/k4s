@@ -42,6 +42,17 @@ set -euo pipefail
 # line number turns that from a guess into a fact.
 trap 'echo "test-cluster.sh: failed at line $LINENO (exit $?)" >&2' ERR
 
+# K4S_XTRACE=1 runs the harness with `set -x`, traced to a file. The trace names
+# the command that failed, and that is the only reliable way to find a failure
+# `set -e` reports as a bare exit status: the ERR trap above does not fire for an
+# explicit exit or a signal, and this harness has both. Give it a file because
+# the trace is far too big for the console.
+if [ -n "${K4S_XTRACE:-}" ]; then
+	exec 2> "${K4S_XTRACE_FILE:-/tmp/k4s-trace.log}"
+	PS4='+${LINENO}: '
+	set -x
+fi
+
 KERNEL=${1:-build/kernel/arch/x86/boot/bzImage}
 BASE=${2:-initramfs.cpio}
 
