@@ -211,17 +211,111 @@ Cilium's datapath:
    node, so filesystem eviction is off in `configs/node/kubelet.yaml` and only
    memory is watched.
 
-3. **Container logs are empty.** Every Cilium pod's log file exists and is
-   empty, including the operator's, which is running happily and certainly
-   printed something. That is not a Cilium problem either: it means the node is
-   not capturing container output, which is worth chasing on its own. It is also
-   why the agent's crash is still unexplained — there is nothing to read. (A
-   guess worth testing: the shim's log fifo.)
+3. **The empty logs were the node's fault, and they were not empty.** Every
+   Cilium pod's log file existed and was empty, including the operator's, which
+   was running happily and had certainly printed something. That looked like the
+   node failing to capture container output. It is not: a pod that does nothing
+   but write to stdout lands in `/var/log/pods/*k4s-log*/log/*.log` intact
+   (`... stdout F K4S_LOG_OK`), so the runtime → shim → log path works. The
+   Cilium logs were empty because those containers had written nothing. The
+   agent's own log was `1.log`, zero bytes, which is the signature of a
+   container that never ran — and it had not.
+
+4. **The agent never ran: a failed `postStart` hook killed it.** The kubelet log
+   says it outright:
+
+   ```
+   failed to "StartContainer" for "cilium-agent" with PostStartHookError:
+   "Exec lifecycle hook ([bash -c set -o pipefail ...]) for Container
+   "cilium-agent" ... failed to exec in container: failed to start e..."
+   ```
+
+   The chart's agent has a `postStart` hook whose entire body is:
+
+   ```bash
+   set -o errexit; set -o pipefail; set -o nounset
+   if [[ "$(iptables-save | grep -E -c 'AWS-SNAT-CHAIN|AWS-CONNMARK-CHAIN')" != "0" ]]
+   then echo 'Deleting iptables rules created by the AWS CNI VPC plugin'
+        iptables-save | grep -E -v 'AWS-SNAT-CHAIN|AWS-CONNMARK-CHAIN' | iptables-restore
+   fi
+   ```
+
+   Its only purpose is deleting leftovers from the **AWS VPC CNI plugin**, which
+   this node has never run; on any non-AWS node it is a no-op. It fails here
+   anyway, because it opens with `iptables-save | grep -c` under `set -o errexit`
+   and this node has no iptables at all — the pipeline fails, `errexit` fires,
+   the hook exits non-zero, and **a failed `postStart` hook makes the kubelet kill
+   the container**. Hence exit 2 and an empty log while the binary itself runs
+   fine by hand. The harness drops the hook when it renders the chart.
+
+5. **The kernel has no XFRM, and `netlink.NewHandle` insists on it.** With the
+   hook gone the agent ran, logged, did real work — envoy, endpoint manager,
+   identity allocator — and then died with:
+
+   ```
+   level=error msg="Start hook failed" function="reconciler.newOps.func1 (.../route/reconciler/reconciler.go:76)"
+   level=error msg="Failed to start hive" error="protocol not supported"
+   level=fatal msg="unable to run agent: failed to start: protocol not supported"
+   ```
+
+   Line 76 is `safenetlink.NewHandle(nil)`, and that is where it dies, before it
+   touches a route. `vishvananda/netlink` opens a socket for **every** family it
+   supports and aborts the whole handle on the first failure:
+
+   ```go
+   var SupportedNlFamilies = []int{unix.NETLINK_ROUTE, unix.NETLINK_XFRM, unix.NETLINK_NETFILTER}
+   ```
+
+   This kernel has no XFRM subsystem at all (`tinyconfig` turns it off), so
+   `socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM)` returns `EPROTONOSUPPORT` —
+   literally *"protocol not supported"*. The fragment above had listed XFRM under
+   "deliberately not included" on the reasoning that it is only for IPsec. It is
+   not optional: **one library's default makes it a startup requirement for the
+   agent.** The fix is `CONFIG_XFRM_USER=y`, which registers the family.
 
 What is *not* the problem, having checked: image pulls are fast (Cilium's image
 came in 9 seconds), seccomp (the chart marks the agent Unconfined, and the
-operator runs under `RuntimeDefault` without trouble), the kernel fragment (no
-feature complaints), and memory (6 GB was plenty).
+operator runs under `RuntimeDefault` without trouble), memory (6 GB was plenty),
+and the agent binary itself, which runs correctly by hand.
+
+### `coreos/go-iptables` is not an implementation
+
+Worth settling, because Cilium really does depend on it (`coreos/go-iptables
+v0.8.0` in v1.20.2's `go.mod`). It cannot help a node with no iptables: it is a
+**wrapper that executes the `iptables` binary**, not iptables in Go.
+
+```go
+path, err := exec.LookPath(cmd)         // iptables.go:152
+cmd := exec.Command(path, "--version")  // iptables.go:655
+```
+
+Its README is explicit — "go-iptables wraps invocation of iptables utility" — and
+gives the reason: netfilter's in-kernel API has no good userspace interface, the
+tables are replaced wholesale via `setsockopt`, and resolving a change to an
+existing table in userspace is error-prone enough that netfilter's own
+maintainers tell you to shell out. So it is a library, and what this node needs
+is a **binary on `PATH`**. Using it here would mean writing a program around it
+that still has nothing to call.
+
+That leaves three honest options if iptables turns out to be needed, none of them
+"use go-iptables":
+
+* **Ship a static `iptables`.** The kernel side is already priced and built
+  (`IP_NF_IPTABLES_LEGACY`, `NETFILTER_XTABLES_LEGACY`, `IP_NF_FILTER/NAT/MANGLE/RAW`,
+  `NETFILTER_XT_TARGET_MASQUERADE` are all `=y` above). The userspace side is a C
+  program, so the image — static, no libc — needs a static build of it. This is
+  the conventional answer and the one Cilium assumes.
+* **Keep the datapath in eBPF.** `kubeProxyReplacement` plus `bpf.masquerade`
+  moves the service and masquerade paths into BPF, which is where Cilium wants to
+  be anyway. iptables then remains needed only for a few host-side odds and ends,
+  and the question becomes how many of those this node actually hits.
+* **A Go shim named `iptables`** that translates to netlink. Technically
+  possible (`mdlayher/netlink`, already an indirect Cilium dependency), but it
+  means reimplementing the semantics the paragraph above calls error-prone, and
+  a shim that silently no-ops a firewall rule is worse than one that fails.
+
+Only the first two are worth doing; the choice between them depends on what the
+agent still asks for once it starts.
 
 ## Suggested order, if we do this
 
