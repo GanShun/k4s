@@ -744,8 +744,14 @@ run_cilium() {
 			local listing
 			for _ in $(seq 1 30); do
 				listing=$(guest_get 'ls /etc/cni/net.d')
-				if printf '%s' "$listing" | grep -q 05-cilium.conflist &&
-					! printf '%s' "$listing" | grep -q 10-flannel.conflist; then
+				# Only that Cilium's conflist is there, matched exactly. Whether
+				# flannel's is still present does not matter: go-cni sorts the
+				# directory lexicographically and 05-cilium wins. An earlier
+				# version also required flannel's to be gone, which was wrong
+				# twice over -- Cilium does not delete it, it renames it to
+				# 10-flannel.conflist.cilium_bak, and a substring grep for
+				# 10-flannel.conflist matched that backup name.
+				if printf '%s' "$listing" | grep -q '^05-cilium\.conflist$'; then
 					echo "cilium: ok (the agent is running, and its CNI config is on the node)"
 					return 0
 				fi
