@@ -91,9 +91,14 @@ test-cluster: kernel $(IMAGE)
 	scripts/test-cluster.sh $(KERNEL) $(IMAGE)
 
 # Cilium needs helm (HELM=... to point at one that is not on PATH) to render its
-# chart. Nothing else about the run differs.
+# chart, and it needs more RAM than flannel does. The node is strictly RAM-only,
+# so containerd's content store is a tmpfs -- and a tmpfs defaults to half of
+# RAM. At the default 1536 MiB that is ~768 MiB, and Cilium's images do not fit:
+# the pull dies with "no space left on device" in the middle of extracting, which
+# surfaces as an agent that never becomes ready. Flannel's images are small
+# enough to fit, so only this target needs the room.
 test-cluster-cni: kernel $(IMAGE)
-	K4S_CNI=cilium scripts/test-cluster.sh $(KERNEL) $(IMAGE)
+	K4S_CNI=cilium K4S_NODE_MEM=6144 scripts/test-cluster.sh $(KERNEL) $(IMAGE)
 
 # One after another, which is also the order of increasing cost. Each is
 # self-contained: its own control plane VM, its own node boot.
