@@ -26,7 +26,10 @@
 # The kubeconfigs and PKI are generated per run and spliced in; never committed.
 #
 # Usage: test-cluster.sh [kernel] [base-initramfs]
-# Env: K4S_BOOT_TIMEOUT  seconds to allow each guest boot (default 240)
+# Env: K4S_BOOT_TIMEOUT  hard bound, in seconds, from a guest's boot to the end
+#                         of its work (default 120). Nothing here should need
+#                         more than that; if it does, something is wrong and
+#                         waiting longer only hides it.
 #      K4S_BOOTS         number of guest boots (default 2)
 
 set -euo pipefail
@@ -52,7 +55,7 @@ DS=$CONFIGS/ds-pod.yaml
 LOGPOD=$CONFIGS/log-pod.yaml
 FLANNEL_DS=$CONFIGS/flannel-ds.yaml
 DEPLOY=$CONFIGS/deploy-pod.yaml
-BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-240}
+BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-120}
 BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
@@ -74,16 +77,23 @@ ACCEL=()
 mkdir -p "$CP" "$NODEDIR"
 
 # One instance at a time. Two would fight over the port forward and over the
-# node VM's console log, which is exactly what happened when a stale run was
-# left waiting in its failure path: the new run's node booted into the same
-# boot1.log and neither could be read.
-exec 9>"$CP/.lock"
-if ! flock -n 9; then
-	echo "another test-cluster.sh is already running (lock: $CP/.lock)" >&2
-	exit 1
+# node VM's console log. Not a lock file: an flock fd is inherited by every
+# child, including the node VM, which K4S_KEEP_CP deliberately leaves running --
+# so the lock outlived the run and the next one could never start. A pid file
+# with a liveness check cannot go stale like that.
+if [ -f "$CP/run.pid" ]; then
+	oldpid=$(cat "$CP/run.pid" 2>/dev/null || true)
+	if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+		echo "another test-cluster.sh is already running (pid $oldpid)" >&2
+		exit 1
+	fi
 fi
+echo $$ > "$CP/run.pid"
 
-log() { printf '\n=== %s ===\n' "$*"; }
+# Every phase line carries the elapsed seconds. The point of this test is to
+# be quick, and the only way to keep it that way is to be able to see where the
+# time goes without guessing.
+log() { printf '\n=== t+%ss %s ===\n' "$SECONDS" "$*"; }
 
 K() {
 	"$CP/kubectl" --server="$APISERVER" \
@@ -391,16 +401,33 @@ feed_guest() {
 	done
 }
 
+# Kill a VM that outlives its bound, and exit as soon as it is gone so this
+# never holds the run open by itself.
+watchdog() {
+	local limit=$1 pid=$2 i
+	for i in $(seq 1 "$limit"); do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 1
+	done
+	echo "WATCHDOG: the guest outlived its ${limit}s bound; killing it" >&2
+	kill -9 "$pid" 2>/dev/null || true
+}
+
 wait_qemu() {
 	local pid i
 	pid=$(cat "$CP/qemu.pid")
-	for i in $(seq 1 $((BOOT_TIMEOUT + 60))); do
+	# The bound is hard: from the guest's boot to the end of its work is
+	# BOOT_TIMEOUT seconds, and a guest that is still running after that is a
+	# bug to be found, not waited out.
+	watchdog "$BOOT_TIMEOUT" "$pid" &
+	for i in $(seq 1 "$BOOT_TIMEOUT"); do
 		if ! kill -0 "$pid" 2>/dev/null; then
 			return 0
 		fi
 		sleep 1
 	done
-	kill "$pid" 2>/dev/null || true
+	echo "the guest was still running after ${BOOT_TIMEOUT}s; killing it" >&2
+	kill -9 "$pid" 2>/dev/null || true
 }
 
 # Wait only for the Node object, not for it to be Ready. When the CNI installs
@@ -496,7 +523,7 @@ run_cilium() {
 	K delete daemonset k4s-flannel -n kube-system --ignore-not-found >/dev/null 2>&1 || true
 	K apply -f "$CILIUM_YAML" >/dev/null
 	local i ready waiting lastwaiting=""
-	for i in $(seq 1 240); do
+	for i in $(seq 1 30); do
 		ready=$(K get daemonset cilium -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
 		if [ "${ready:-0}" = 1 ]; then
 			echo "cilium: ok (the agent is running on the node)"
@@ -524,7 +551,7 @@ run_cilium() {
 			# interesting diagnostics are on the node, not here. Polled, so a
 			# guest that is already done costs nothing.
 			local g
-			for g in $(seq 1 80); do
+			for g in $(seq 1 30); do
 				grep -qa 'K4S_CHECK_END' "$CP/boot1.log" && break
 				sleep 2
 			done

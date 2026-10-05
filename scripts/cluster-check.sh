@@ -78,7 +78,7 @@ echo "K4S_CHECK: kubelet: started"
 # Poll rather than sleep: a working node reaches the end of this in a couple of
 # seconds, and a broken one is bounded at three minutes. The deploy pod is the
 # last to appear, so waiting for it covers the others.
-i=0; while [ ! -s /var/log/k4s-deploy/result ] && [ $i -lt 30 ]; do sleep 2; i=$((i+1)); done
+i=0; while [ ! -s /var/log/k4s-deploy/result ] && [ $i -lt 15 ]; do sleep 2; i=$((i+1)); done
 echo "--- markers ---"
 cat /var/log/k4s-smoke/result
 cat /var/log/k4s-netns/result
