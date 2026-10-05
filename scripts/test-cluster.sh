@@ -302,15 +302,25 @@ feed_guest() {
 		printf '%s\n' "$line"
 		sleep 0.05
 	done
-	# Bounded. This is the middle of a pipeline that is backgrounded, and the
-	# guest does not power itself off -- the harness kills the VM -- so if that
-	# ever fails to happen this subshell would sit here forever holding the
-	# caller's stdout open. That is what made a fully successful run report as a
-	# timeout: the harness had printed cluster: ok and exited.
-	while [ ! -s "$pidfile" ] || kill -0 "$(cat "$pidfile")" 2>/dev/null; do
+	# Wait for the pidfile to be written -- the caller creates it only after this
+	# pipeline has started -- and then wait for the VM to go away.
+	#
+	# A missing pidfile must NOT mean "keep waiting". cp_down removes
+	# controlplane.pid when it stops the control plane VM, so once that has
+	# happened the file is gone for good, and a condition of the form
+	# `[ ! -s "$pidfile" ] || kill -0 ...` stayed true and spun here for its whole
+	# bound. A trace caught it at waited=189 against a pidfile that no longer
+	# existed, which is the sort of thing that shows up as a run that is fine and
+	# then mysteriously is not.
+	while [ ! -s "$pidfile" ] && [ "$waited" -lt 30 ]; do
 		sleep 1
 		waited=$((waited + 1))
-		[ "$waited" -lt 300 ] || break
+	done
+	waited=0
+	while kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; do
+		sleep 1
+		waited=$((waited + 1))
+		[ "$waited" -lt 600 ] || break
 	done
 }
 
