@@ -1,0 +1,30 @@
+# The pod that needs a CNI, on a node that has none.
+#
+# This is the negative half of the M1 networking story, and it is here on
+# purpose. With only the loopback plugin on disk, containerd's setupPodNetwork
+# finds no IP on eth0 in the CNI result and refuses to create the sandbox:
+#
+#   failed to setup network for sandbox "...": failed to find network info for sandbox "..."
+#
+# so a pod like this never starts. scripts/test-cluster.sh asserts that it fails
+# in exactly that way, which turns "the node works without a CNI" from a guess
+# into a claim with a known boundary. The boundary is a CNI that assigns the
+# sandbox an address, not merely a CNI config file being present.
+#
+# When a real CNI lands, this pod starts, the check fails, and the check has to
+# be turned into the positive one ("the pod got an address and can be reached").
+#
+# nodeName pins it as with the smoke pod: the throwaway control plane has no
+# scheduler. No marker file, because it is not expected to run.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-netns
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  restartPolicy: Never
+  containers:
+    - name: netns
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]

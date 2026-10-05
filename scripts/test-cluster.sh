@@ -11,6 +11,8 @@
 #   4. splice the kubeconfig into a copy of the initramfs
 #   5. boot the node image, wait for it to register, create the pod, and check
 #      the container wrote its marker
+#   5b. also create a pod that asks for its own network namespace, and check
+#      that it cannot start: that is the boundary of the no-CNI node
 #   6. boot it again, unchanged, and check it rejoins and the pod returns
 #
 # The kubeconfig is issued per run and spliced in; it is never committed.
@@ -34,6 +36,7 @@ SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
 GUEST=$(dirname "$0")/cluster-check.sh
 POD=$(dirname "$0")/../configs/node/smoke-pod.yaml
+NETNS_POD=$(dirname "$0")/../configs/node/netns-pod.yaml
 BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-240}
 BOOTS=${K4S_BOOTS:-2}
 
@@ -238,6 +241,33 @@ run_pod() {
 	return 1
 }
 
+# A pod that asks for its own network namespace must not start: containerd has
+# no address to give it, so it never creates the sandbox. Asserting the failure
+# is what gives "the node works without a CNI" a boundary; see netns-pod.yaml.
+check_netns_pod_cannot_start() {
+	local i ph msg
+	for i in $(seq 1 60); do
+		ph=$(K get pod k4s-netns -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			echo "netns pod: FAILED (a pod with its own netns started, so the node now has a CNI: invert this check)" >&2
+			K delete pod k4s-netns --wait=false >/dev/null 2>&1 || true
+			return 1
+		fi
+		msg=$(K get events --field-selector involvedObject.name=k4s-netns \
+			-o jsonpath='{.items[*].message}' 2>/dev/null || true)
+		if [[ "$msg" == *"failed to find network info"* ]]; then
+			echo "netns pod: ok (no CNI: a pod with its own netns cannot start, as expected)"
+			K delete pod k4s-netns --wait=false >/dev/null 2>&1 || true
+			return 0
+		fi
+		sleep 2
+	done
+	echo "netns pod: FAILED (no CNI error appeared; expected 'failed to find network info')" >&2
+	K describe pod k4s-netns 2>&1 | tail -20 | sed 's/^/  /' >&2
+	K delete pod k4s-netns --wait=false >/dev/null 2>&1 || true
+	return 1
+}
+
 check_marker() {
 	local clean
 	clean=$(mktemp -t k4s-clean.XXXXXX)
@@ -281,7 +311,12 @@ if ! wait_node; then
 	exit 1
 fi
 echo "node: ok (registered and Ready)"
+# Both pods go on together: the smoke pod must run, and the pod that needs a CNI
+# must not, which together are the whole statement about this node's networking.
 run_pod
+log "applying the pod that needs a CNI (it must not start)"
+K apply -f "$NETNS_POD" >/dev/null
+check_netns_pod_cannot_start
 wait_qemu
 check_marker "$CP/boot1.log"
 

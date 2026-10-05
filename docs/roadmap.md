@@ -58,7 +58,9 @@ UEFI PXE
 - Join: TLS bootstrap with short-TTL node certs, a one-time or attested
   bootstrap credential, and reaping of stale `Node` objects.
 - Networking: CNI is undecided. Cilium for prod parity eventually; the first
-  bring-up only needs registration and a pod.
+  bring-up only needs registration and a pod. The node works today with nothing
+  but the loopback plugin, but only for `hostNetwork` pods — see the networking
+  baseline under M1.
 - Kill path (M2): watchdog plus an out-of-band power switch, per the intrusic
   threat model.
 
@@ -110,6 +112,48 @@ at all. The runc fork now compiles profiles in Go (see
 Still open from M1: the smoke pod is `hostNetwork: true` because CNI is
 undecided, and the pod is pinned with `nodeName` because the throwaway control
 plane has no scheduler.
+
+### Networking baseline: what a node with no CNI can and cannot do (2026-10-05)
+
+CNI is undecided, so it is worth being exact about what the node does today. The
+image ships only the loopback plugin and one trivial conflist: there is no pod
+network. `make test-cluster` now asserts both halves of that.
+
+- **The node is a working worker.** It registers, becomes `Ready`, runs a
+  `hostNetwork: true` pod, and comes back after a reboot.
+- **A pod that asks for its own network namespace cannot start.** containerd
+  refuses to create the sandbox and the pod stays in `ContainerCreating`:
+
+  ```
+  FailedCreatePodSandBox: Failed to create pod sandbox: rpc error: code = Unknown
+  desc = failed to setup network for sandbox "...": failed to find network info
+  for sandbox "..."
+  ```
+
+That is not a bug to fix, it is where the boundary is, and the test states it
+(`configs/node/netns-pod.yaml`). When a real CNI lands that pod starts, the check
+fails, and it has to be inverted into the positive one.
+
+The mechanics, worth knowing before choosing a CNI:
+
+- A `hostNetwork: true` sandbox skips CNI entirely: containerd calls
+  `setupPodNetwork` only under `if !hostNetwork(config)`.
+- A pod with its own netns is accepted only if the CNI result carries an address
+  on `eth0`. containerd looks for `result.Interfaces["eth0"].IPConfigs` and
+  otherwise returns `failed to find network info for sandbox`. A loopback plugin
+  assigns nothing, so it cannot satisfy this, however many times it is listed.
+- The conflist is **mandatory** all the same, which is the least obvious part.
+  With containerd's defaults (`use_internal_loopback = false`) the CRI loads
+  `cni.WithLoNetwork` — a synthetic loopback network it builds in memory — plus
+  the conf dir, and requires two networks (`networkAttachCount = 2`). The
+  synthetic one is one, so exactly one conflist on disk makes up the difference.
+  With `use_internal_loopback = true` the synthetic one is dropped and the
+  requirement drops to one, so a conflist is *still* required. There is no
+  setting under which the CRI reports `NetworkReady` with an empty
+  `/etc/cni/net.d`.
+- The shipped conflist is `cniVersion 1.0.0`, and the CNI `STATUS` verb is only
+  called for 1.1.0 and later, so nothing executes the plugin until a pod asks
+  for a network. The file is counted, not run.
 
 ### M2 — Ephemeral hygiene and the kill switch
 

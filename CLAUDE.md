@@ -221,6 +221,12 @@ container's own `K4S_CONTAINER_OK` output.
 
 ## Known limitations
 
+- **No pod network.** The image ships only the loopback CNI plugin, and
+  `make test-cluster` asserts both halves: a `hostNetwork` pod runs, and a pod
+  with its own netns cannot start (`failed to find network info for sandbox`).
+  The conflist is load-bearing even so — the CRI will not report `NetworkReady`
+  with an empty `/etc/cni/net.d`. The "networking baseline" section of
+  `docs/roadmap.md` has the mechanics.
 - **Seccomp is enforced, and the rules are a search tree.** The fork compiles
   the profile in Go and installs it, so a `RuntimeDefault` pod really runs under
   `SECCOMP_MODE_FILTER` (the M1 test asserts it). A syscall costs O(log rules)
