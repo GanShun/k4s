@@ -45,3 +45,6 @@ etcd
 # Kernel source checkout (kept out of the repo) and kernel build output
 /linux/
 /build/
+
+# pi agent task logs (tool-internal, not part of the project)
+.pi/

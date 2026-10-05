@@ -75,11 +75,19 @@ the 15 options its documentation lists, it is those plus ten gates, and the
 gates are the part that fails silently. Two of the symbols it names are not even
 settable in a 7.2 kernel.
 
-To reproduce the numbers above, with pahole from the Ubuntu package unpacked
-into `/tmp/dwarves-root` (no root needed) and a separate build directory so the
-node kernel is left alone:
+**This fragment is now part of the default node kernel.** `make kernel` applies
+`configs/k4s-tiny.config` and `configs/k4s-cni.config` together, so one kernel
+can run either CNI and there is no separate Cilium build to remember. It costs
+about 1.5 MiB of bzImage and makes **pahole** a build-time prerequisite, since
+`CONFIG_DEBUG_INFO_BTF` is in there. `make kernel` checks for it up front and
+says what to install; `PAHOLE=/path/to/pahole make kernel` works if it is not on
+`PATH`.
 
-```
+The numbers below were measured before that change, with the fragment applied by
+hand into a separate `build/kernel-cni` so the node kernel was left alone. They
+are kept because they are what the decision was made on:
+
+```sh
 export PATH=/tmp/dwarves-root/usr/bin:$PATH    # needed by olddefconfig too
 make -C linux O=$PWD/build/kernel-cni tinyconfig
 cat configs/k4s-tiny.config configs/k4s-cni.config >> build/kernel-cni/.config

@@ -26,11 +26,13 @@
 # The kubeconfigs and PKI are generated per run and spliced in; never committed.
 #
 # Usage: test-cluster.sh [kernel] [base-initramfs]
-# Env: K4S_BOOT_TIMEOUT  hard bound, in seconds, from a guest's boot to the end
-#                         of its work (default 120). Nothing here should need
-#                         more than that; if it does, something is wrong and
-#                         waiting longer only hides it.
-#      K4S_BOOTS         number of guest boots (default 2)
+# Env: K4S_BOOTS         number of guest boots (default 2)
+#
+# There is no boot timeout here any more. The node no longer decides when it has
+# finished -- it brings itself up and stays up -- so the guest is killed once the
+# harness has what it needs, and every wait in this script is individually
+# bounded. A fixed "kill it after N seconds" bound used to sit on top of that and
+# mostly served to hide the waits that were too long.
 
 set -euo pipefail
 
@@ -48,7 +50,6 @@ APISERVER="https://127.0.0.1:$PORT"
 SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
 CP_IMAGE=$CP/controlplane-image.cpio
-GUEST=$(dirname "$0")/cluster-check.sh
 CP_GUEST=$(dirname "$0")/controlplane-boot.sh
 CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
@@ -57,7 +58,7 @@ DS=$CONFIGS/ds-pod.yaml
 LOGPOD=$CONFIGS/log-pod.yaml
 FLANNEL_DS=$CONFIGS/flannel-ds.yaml
 DEPLOY=$CONFIGS/deploy-pod.yaml
-BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-120}
+BOOTS=${K4S_BOOTS:-2}
 BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
@@ -253,6 +254,28 @@ cp_down() {
 	sleep 1
 }
 
+# Feed a guest its script, one line at a time. Still used for the control plane
+# VM, whose image is built by this script and whose script is therefore spliced
+# in rather than being a file in the image the way the node's uinit is.
+#
+# One line at a time, and slowly: handing the whole script to the serial port at
+# once overruns the guest's UART and drops characters, which corrupts the script
+# and stops the guest partway through -- the console simply ends mid-file with no
+# error, and everything the guest was supposed to print afterwards is missing.
+# At 115200 baud a 78-character line takes about 7ms, so 50ms leaves plenty of
+# room. It also holds stdin open until the VM is gone, because gosh treats a
+# closed stdin as end of script.
+feed_guest() {
+	local pidfile=$1 line
+	while IFS= read -r line; do
+		printf '%s\n' "$line"
+		sleep 0.05
+	done
+	while [ ! -s "$pidfile" ] || kill -0 "$(cat "$pidfile")" 2>/dev/null; do
+		sleep 1
+	done
+}
+
 wait_apiserver() {
 	local i
 	# Generous, because this polls across a VM boot: QEMU, then etcd, then the
@@ -417,77 +440,29 @@ splice_image() {
 boot() {
 	local n=$1
 	log "booting the node image (run $n/$BOOTS)"
-	# Hold stdin open past the script so gosh does not see EOF and exit.
-	{
-		# Cilium's DaemonSet mounts /lib/modules unconditionally, and this image
-		# has no modules and so no such directory.
-		#
-		# Cilium's conflist has to be the only one on disk before containerd
-		# starts, because the CRI reads that directory once and then uses what it
-		# cached. Leaving flannel's there means containerd caches the flannel
-		# plugin and every sandbox fails with "failed to load flannel
-		# 'subnet.env'", which is exactly what happened. The Cilium conflist is
-		# spliced into the image for the same reason: deleting flannel's and
-		# waiting for Cilium to write its own leaves the directory empty when
-		# containerd looks, and a directory with no conflist in it is
-		# ErrCNINotInitialized, which is the same failure one step earlier.
-		if [ "$CNI" = cilium ]; then
-			printf 'mkdir -p /lib/modules\n'
-			printf 'rm -f /etc/cni/net.d/10-flannel.conflist\n'
-		fi
-		cat "$GUEST"
-	} | feed_guest "$CP/qemu.pid" | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
+	# Nothing is fed to the console. The node brings itself up from
+	# configs/node/uinit.sh, which DIT installs as /bin/uinit: init runs it,
+	# waits for it to return, and then falls through to a shell. Feeding a script
+	# to the serial console is what this used to do, and it cost a great deal of
+	# time -- the console drops characters when handed a lot at once, so the
+	# script arrived corrupted and the guest stopped partway through with no
+	# error, and every log that should have followed was never reached.
+	qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
 			-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
 			-device virtio-net-pci,netdev=n0 \
 			-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
 			-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
-			-nographic -no-reboot > "$CP/boot$n.log" 2>&1 &
+			-nographic -no-reboot </dev/null > "$CP/boot$n.log" 2>&1 &
 	echo $! > "$CP/qemu.pid"
 }
 
-# Feed the guest its script, then hold stdin open until the VM is gone: gosh
-# treats a closed stdin as end of script and would exit before the guest has
-# finished. The point is that it must not outlive the VM. Sleeping a fixed
-# BOOT_TIMEOUT + 60 here instead leaves the pipeline -- and therefore anything
-# that waits for it, including this script's own exit -- alive for up to eleven
-# minutes after the guest has powered off, which is dead time on every run.
-#
-# One line at a time, and slowly. Handing the whole script to the serial port at
-# once overruns the guest's UART and drops characters, which corrupts the script
-# and stops the guest partway through -- the console simply ends mid-file with no
-# error, and everything the guest was supposed to print afterwards is missing.
-# At 115200 baud a 78-character line takes about 7ms, so 50ms leaves plenty of
-# room; a 150-line script costs under eight seconds.
-feed_guest() {
-	local pidfile=$1 line
-	while IFS= read -r line; do
-		printf '%s\n' "$line"
-		sleep 0.05
-	done
-	while [ ! -s "$pidfile" ] || kill -0 "$(cat "$pidfile")" 2>/dev/null; do
-		sleep 1
-	done
-}
-
-# Kill a VM that outlives its bound, and exit as soon as it is gone so this
-# never holds the run open by itself.
-watchdog() {
-	local limit=$1 pid=$2 i
-	for i in $(seq 1 "$limit"); do
-		kill -0 "$pid" 2>/dev/null || return 0
-		sleep 1
-	done
-	echo "WATCHDOG: the guest outlived its ${limit}s bound; killing it" >&2
-	kill -9 "$pid" 2>/dev/null || true
-}
-
-# The guest is not asked to power itself off, and this does not wait for it to
-# exit. It used to, and that made the guest's own idea of when it had finished
-# race every check the harness makes: the guest would shut down as soon as its
-# script ended, while the harness was still applying pods and waiting for them,
-# so the files read afterwards were empty and the VM was gone. The harness knows
-# when it is done -- it is the one waiting for the markers -- so it reads what it
-# needs over ssh and then stops the VM.
+# The guest is not asked to power itself off, and nothing waits for it to exit.
+# It used to, and that made the guest's own idea of when it had finished race
+# every check the harness makes: the guest would shut down as soon as its script
+# ended, while the harness was still applying pods and waiting for them, so the
+# files read afterwards were empty and the VM was gone. The harness knows when it
+# is done -- it is the one waiting for the markers -- so it reads what it needs
+# over ssh and then stops the VM.
 stop_guest() {
 	local pid
 	pid=$(cat "$CP/qemu.pid" 2>/dev/null || true)
@@ -497,23 +472,6 @@ stop_guest() {
 		kill -0 "$pid" 2>/dev/null || return 0
 		sleep 1
 	done
-	kill -9 "$pid" 2>/dev/null || true
-}
-
-wait_qemu() {
-	local pid i
-	pid=$(cat "$CP/qemu.pid")
-	# The bound is hard: from the guest's boot to the end of its work is
-	# BOOT_TIMEOUT seconds, and a guest that is still running after that is a
-	# bug to be found, not waited out.
-	watchdog "$BOOT_TIMEOUT" "$pid" &
-	for i in $(seq 1 "$BOOT_TIMEOUT"); do
-		if ! kill -0 "$pid" 2>/dev/null; then
-			return 0
-		fi
-		sleep 1
-	done
-	echo "the guest was still running after ${BOOT_TIMEOUT}s; killing it" >&2
 	kill -9 "$pid" 2>/dev/null || true
 }
 
@@ -703,8 +661,8 @@ run_cilium() {
 			# events*, so a pod applied in that gap gets whatever was loaded at
 			# init: flannel's plugin, or nothing at all. Wait for the directory
 			# to say what the pods need before handing it any.
-			local c listing
-			for c in $(seq 1 30); do
+			local listing
+			for _ in $(seq 1 30); do
 				listing=$(guest_get 'ls /etc/cni/net.d')
 				if printf '%s' "$listing" | grep -q 05-cilium.conflist &&
 					! printf '%s' "$listing" | grep -q 10-flannel.conflist; then

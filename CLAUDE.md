@@ -24,20 +24,35 @@ make image     # build initramfs.cpio (runs ./DIT)
 make kernel    # configure + build linux/ into build/kernel/bzImage
 make run       # boot the image interactively under QEMU
 make test      # boot headless and run scripts/guest-check.sh
-make test-cluster  # M1: throwaway control plane VM + kubelet joins + pods run
+make test-cluster      # M1: control plane VM + kubelet joins + pods run (flannel)
+make test-cluster-cni  # the same test with Cilium as the CNI
+make test-all  # all three, one after another
 make clean     # remove build products (keeps the kernel checkout)
 ```
+
+`make kernel` adds both `configs/k4s-tiny.config` and `configs/k4s-cni.config`, so
+one kernel can run either CNI. The second fragment needs **pahole** (the dwarves
+package) at configure and build time for `CONFIG_DEBUG_INFO_BTF`; if it is not on
+`PATH`, point at it with `PAHOLE=/path/to/pahole make kernel`.
 
 `make test` prints three verdict lines — `boot: ok`, `capabilities: ok`,
 `container: ok` — and a `guest log:` path. `K4S_BOOT_TIMEOUT` (seconds, default
 180) caps the guest run.
 
-`make test-cluster` is the M1 join test and takes several minutes: it builds the
-control-plane binaries, generates throwaway PKI, boots a **control plane VM**
-(etcd, apiserver, controller-manager, scheduler) and then the node twice (join,
-then reboot-and-rejoin). It prints `node: ok`, `flannel: ok`, `pod: ok`,
-`netns pod: ok`, `daemonset: ok`, `deployment: ok`, `cluster: ok`. `K4S_BOOTS` (default 2) sets
-the number of boots. Both VMs are killed on exit.
+`make test-cluster` is the M1 join test: it builds the control-plane binaries,
+generates throwaway PKI, boots a **control plane VM** (etcd, apiserver,
+controller-manager, scheduler) and then the node twice (join, then
+reboot-and-rejoin). It prints `node: ok`, `flannel: ok` or `cilium: ok`,
+`pod: ok`, `netns pod: ok`, `daemonset: ok`, `deployment: ok`, `cluster: ok`.
+`K4S_BOOTS` (default 2) sets the number of boots. Both VMs are killed on exit.
+
+Every run is self-contained: it stops any control plane VM left by an earlier run
+and boots its own, so no run can pass or fail on another run's objects. That is
+also why it is quick — around 75 seconds for two boots with flannel, and around
+210 with Cilium, whose agent has to install itself first.
+
+`make test-cluster-cni` needs **helm** to render Cilium's chart (`HELM=...` to
+point at one that is not on `PATH`); nothing else about the run differs.
 
 The control plane is a VM rather than host processes because a node should join
 something shaped like a real cluster: the controller-manager assigns pod CIDRs,
@@ -98,14 +113,15 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | Path | What |
 | --- | --- |
 | `DIT` | The build: pinned clone → tidy → standalone binaries → assemble |
-| `Makefile` | `image`/`kernel`/`run`/`test`/`test-cluster` wrappers |
+| `Makefile` | `image`/`kernel`/`run`/`test`/`test-cluster`/`test-cluster-cni`/`test-all` wrappers |
 | `configs/k4s-tiny.config` | Kernel fragment appended over `tinyconfig` |
-| `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflist, smoke pod |
+| `configs/k4s-cni.config` | Second kernel fragment, also always applied: what Cilium needs |
+| `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflists, pod manifests, and `uinit.sh` |
+| `configs/node/uinit.sh` | The node's own bring-up, installed as `/bin/uinit` and run by u-root's init |
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |
 | `scripts/controlplane-boot.sh` | Guest half of that test: the control plane VM's own boot |
-| `scripts/cluster-check.sh` | The guest half of that test, piped into gosh |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/testing.md` | What the two tests are, how a cluster test runs, and what the
 harness cost to get working |
@@ -192,11 +208,28 @@ Fragment entries that are load-bearing and non-obvious:
 
 ## Test harness
 
-`scripts/test-boot.sh <kernel> <initramfs> [guest-script]` boots QEMU with
-`-nographic` and pipes `scripts/guest-check.sh` into the guest's stdin. u-root's
-`gosh` treats a non-tty stdin as a script, so **every line of `guest-check.sh`
-must be a complete command** — no multi-line `if`/`for` blocks, and keep lines
-short enough not to wrap on the serial console.
+Two tests, and they feed the guest differently on purpose.
+
+`scripts/test-boot.sh <kernel> <initramfs> [guest-script]` (behind `make test`)
+boots QEMU with `-nographic` and pipes `scripts/guest-check.sh` into the guest's
+stdin. u-root's `gosh` treats a non-tty stdin as a script, so **every line of
+`guest-check.sh` must be a complete command** — no multi-line `if`/`for` blocks,
+and keep lines short enough not to wrap on the serial console.
+
+`make test-cluster` feeds the node **nothing**. The node brings itself up from
+`configs/node/uinit.sh`, which `DIT` installs as `/bin/uinit`: u-root's init runs
+`/inito`, `/bbin/uinit`, `/bin/uinit`, `/buildbin/uinit`, `/bin/defaultsh` and
+`/bin/sh` in sequence, waiting for each to exit, so a uinit that starts the
+daemons in the background and returns leaves the console at a shell afterwards.
+The harness then reads the results out of the node over **ssh**.
+
+That split is not cosmetic. Feeding a script to the serial console is fragile in
+three ways that all cost real time here: the console drops characters when handed
+a lot at once, so the script arrives corrupted and the guest stops partway
+through with no error; a log has to be printed at exactly the right moment to be
+caught at all; and printing one takes minutes at 115200 baud. A file in the image
+cannot be corrupted in transit, and a file read over ssh does not care when it is
+read. See `docs/testing.md`.
 
 The QEMU cmdline is
 `console=ttyS0,115200 panic=-1 cgroup_no_v1=all`. The last flag is not
@@ -204,10 +237,10 @@ optional: u-root's init mounts cgroup **v1** controllers, which binds `cpu`,
 `pids` and `io` to v1 and leaves cgroup v2 with only `cpuset` and `memory`; runc
 then fails with `openat2 .../cpu.weight: no such file or directory`.
 
-The harness strips ANSI escapes and `gosh` `$ ` prompt lines before grepping,
-because the guest echoes the script and a literal `fail` also appears in the
-echoed source. Success is: an end marker, no `K4S_CHECK: ...: fail`, and the
-container's own `K4S_CONTAINER_OK` output.
+For `make test`, the harness strips ANSI escapes and `gosh` `$ ` prompt lines
+before grepping, because the guest echoes the script and a literal `fail` also
+appears in the echoed source. Success is: an end marker, no
+`K4S_CHECK: ...: fail`, and the container's own `K4S_CONTAINER_OK` output.
 
 ## Key decisions
 

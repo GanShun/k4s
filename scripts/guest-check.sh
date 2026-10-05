@@ -1,6 +1,11 @@
 #!/bin/sh
 #
-# Capability check run inside the k4s initramfs over the serial console.
+# Capability check, run inside the k4s initramfs over the serial console.
+#
+# This only checks. The node brings itself up before this runs -- mounts,
+# cgroup2, containerd, and so on, from configs/node/uinit.sh via u-root's init
+# -- so there is nothing to set up here, and setting any of it up twice would
+# fail: a second mount of cgroup2, a second containerd fighting for the socket.
 #
 # The guest console is a tty, so u-root's gosh runs interactively and executes
 # this one line at a time. Every line must be a complete command: no multi-line
@@ -13,28 +18,23 @@ test -r /proc/version && echo "K4S_CHECK: proc: ok" || echo "K4S_CHECK: proc: fa
 test -d /sys/kernel && echo "K4S_CHECK: sysfs: ok" || echo "K4S_CHECK: sysfs: fail"
 test -e /dev/null && echo "K4S_CHECK: devtmpfs: ok" || echo "K4S_CHECK: devtmpfs: fail"
 
+# A tmpfs this script mounts itself, rather than one uinit already mounted: the
+# point is that the kernel can do it at all.
 mkdir -p /tmp/k4s
 mount -t tmpfs tmpfs /tmp/k4s
 echo hello > /tmp/k4s/test && echo "K4S_CHECK: tmpfs: ok" || echo "K4S_CHECK: tmpfs: fail"
 
 containerd --version && echo "K4S_CHECK: containerd: ok" || echo "K4S_CHECK: containerd: fail"
 coredns -version && echo "K4S_CHECK: coredns: ok" || echo "K4S_CHECK: coredns: fail"
-# Network: QEMU user-mode NIC. dhclient must be told IPv4 only, or it blocks
-# forever waiting for a DHCPv6 server that does not exist.
-ip link set eth0 up
-dhclient -ipv6=false -timeout 10 eth0
+
+# The network was configured by uinit; this checks that it worked.
 ip -4 addr show dev eth0 | grep -q 'inet ' && echo "K4S_CHECK: net: ok" || echo "K4S_CHECK: net: fail"
 
-# runc and containerd want a cgroup2 hierarchy; u-root's init leaves none.
-mkdir -p /sys/fs/cgroup
-mount -t cgroup2 none /sys/fs/cgroup
+# runc and containerd want a cgroup2 hierarchy, which uinit mounted.
 test -e /sys/fs/cgroup/cgroup.controllers && echo "K4S_CHECK: cgroup2: ok" || echo "K4S_CHECK: cgroup2: fail"
 
-# containerd's state wants a writable, xattr-capable filesystem; ramfs is not.
-mkdir -p /var/lib/containerd /run/containerd
-mount -t tmpfs tmpfs /var/lib/containerd
-containerd </dev/null >/tmp/containerd.log 2>&1 &
-sleep 5
+# containerd is running because uinit started it and waited for its socket, so
+# this fails if that did not happen rather than papering over it.
 ctr version >/dev/null 2>&1 && echo "K4S_CHECK: ctr: ok" || echo "K4S_CHECK: ctr: fail"
 
 containerd-shim-runc-v2 -v >/dev/null 2>&1 && echo "K4S_CHECK: shim: ok" || echo "K4S_CHECK: shim: fail"

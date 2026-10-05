@@ -178,6 +178,7 @@ CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 	-files build/cni-flannel:opt/cni/bin/flannel \
 	-files configs/node/10-flannel.conflist:etc/cni/net.d/10-flannel.conflist \
 	-files configs/node/flannel-net-conf.json:etc/kube-flannel/net-conf.json \
+	-files configs/node/uinit.sh:bin/uinit \
 	u-root/cmds/core/* \
 	./containerd/cmd/containerd \
 	./containerd/cmd/ctr \

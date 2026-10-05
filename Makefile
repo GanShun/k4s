@@ -1,13 +1,21 @@
-# k4s build system: kernel + u-root initramfs, and a QEMU smoke test.
+# k4s build system: kernel + u-root initramfs, and the QEMU tests.
 #
-#   make image    build the u-root initramfs (runs ./DIT)
-#   make kernel   configure and build linux/ into build/kernel/bzImage
-#   make run      boot the image interactively under QEMU
-#   make test     boot headless and run the capability check
-#   make clean    remove build products (keeps the kernel checkout)
+#   make image          build the u-root initramfs (runs ./DIT)
+#   make kernel         configure and build linux/ into build/kernel/bzImage
+#   make run            boot the image interactively under QEMU
+#   make test           boot headless and run the capability check
+#   make test-cluster   M1 join test with flannel (the default CNI)
+#   make test-cluster-cni  M1 join test with Cilium
+#   make test-all       all three, one after another
+#   make clean          remove build products (keeps the kernel checkout)
 #
-# The kernel starts from `tinyconfig` and adds configs/k4s-tiny.config. The
-# kernel is checked out at linux/ (gitignored, cloned separately).
+# The kernel starts from `tinyconfig` and adds configs/k4s-tiny.config, then
+# configs/k4s-cni.config on top. The second one is what Cilium needs -- XFRM,
+# nftables, CGROUP_NET_CLASSID and BTF among them -- and it is included always so
+# that one kernel can run either CNI. It costs about 1.5 MiB of bzImage and a
+# build-time dependency on pahole (see check-pahole).
+#
+# The kernel is checked out at linux/ (gitignored, cloned separately).
 
 NPROC      := $(shell nproc)
 LINUX      := linux
@@ -15,9 +23,14 @@ BUILD      := build/kernel
 ABS_BUILD  := $(abspath $(BUILD))
 KERNEL     := $(BUILD)/arch/x86/boot/bzImage
 FRAGMENT   := configs/k4s-tiny.config
+CNI_FRAGMENT := configs/k4s-cni.config
 IMAGE      := initramfs.cpio
 
 QEMU       := qemu-system-x86_64
+# pahole, from the dwarves package, is needed for CONFIG_DEBUG_INFO_BTF. The
+# kernel's own Makefile honours this variable, so point it at a binary that is
+# not on PATH with PAHOLE=/path/to/pahole make kernel.
+PAHOLE     ?= pahole
 # KVM when the user can reach /dev/kvm, otherwise fall back to TCG (slow).
 QEMU_ACCEL := $(shell [ -w /dev/kvm ] && echo "-enable-kvm -cpu host")
 QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
@@ -25,7 +38,8 @@ QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
               -kernel $(KERNEL) -initrd $(IMAGE) \
               -append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" -no-reboot
 
-.PHONY: all image kernel run test test-cluster clean distclean
+.PHONY: all image kernel run test test-cluster test-cluster-cni test-all \
+        check-pahole clean distclean
 
 all: image
 
@@ -40,16 +54,30 @@ $(IMAGE): DIT
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# tinyconfig is the smallest base; $(FRAGMENT) adds what the image needs.
-$(BUILD)/.config: $(FRAGMENT) | $(BUILD)
-	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) tinyconfig
-	cat $(FRAGMENT) >> $(BUILD)/.config
-	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) olddefconfig
+# BTF generation needs pahole from the dwarves package. CONFIG_DEBUG_INFO_BTF
+# makes the kernel build run it over vmlinux, and without it the build fails in
+# the middle of compiling with an unhelpful error, so check up front.
+check-pahole:
+	@command -v $(PAHOLE) >/dev/null 2>&1 || { \
+		echo "pahole not found, and CONFIG_DEBUG_INFO_BTF needs it." >&2; \
+		echo "  Debian/Ubuntu: apt-get install dwarves" >&2; \
+		echo "  or build it from https://github.com/acmel/dwarves" >&2; \
+		echo "  or point at one that is not on PATH: PAHOLE=/path/to/pahole make kernel" >&2; \
+		exit 1; \
+	}
+
+# tinyconfig is the smallest base; the fragments add what the image needs.
+# olddefconfig needs pahole too, not just the build: DEBUG_INFO_BTF's value is
+# resolved while the config is being settled.
+$(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) check-pahole | $(BUILD)
+	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) tinyconfig
+	cat $(FRAGMENT) $(CNI_FRAGMENT) >> $(BUILD)/.config
+	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) olddefconfig
 
 kernel: $(KERNEL)
 
 $(KERNEL): $(BUILD)/.config
-	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) -j$(NPROC) bzImage
+	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) -j$(NPROC) bzImage
 
 run: kernel $(IMAGE)
 	$(QEMU) $(QEMU_ARGS) -nographic
@@ -57,9 +85,19 @@ run: kernel $(IMAGE)
 test: kernel $(IMAGE)
 	scripts/test-boot.sh $(KERNEL) $(IMAGE)
 
-# M1 join test: a throwaway control plane on the host, kubelet in the guest.
+# M1 join test: a throwaway control plane in one VM, kubelet in the guest.
+# flannel is the default CNI; test-cluster-cni runs the same test with Cilium.
 test-cluster: kernel $(IMAGE)
 	scripts/test-cluster.sh $(KERNEL) $(IMAGE)
+
+# Cilium needs helm (HELM=... to point at one that is not on PATH) to render its
+# chart. Nothing else about the run differs.
+test-cluster-cni: kernel $(IMAGE)
+	K4S_CNI=cilium scripts/test-cluster.sh $(KERNEL) $(IMAGE)
+
+# One after another, which is also the order of increasing cost. Each is
+# self-contained: its own control plane VM, its own node boot.
+test-all: test test-cluster test-cluster-cni
 
 clean:
 	-$(MAKE) -C $(LINUX) O=$(ABS_BUILD) clean
