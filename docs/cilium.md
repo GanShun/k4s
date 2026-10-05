@@ -26,54 +26,66 @@ these are the host paths its DaemonSet mounts:
 /sys/fs/bpf   /var/run/netns  /etc/cni/net.d  /opt/cni/bin  /var/run/cilium
 ```
 
-## Blocker 1: the kernel has no eBPF datapath
+## Blocker 1: the kernel has no eBPF datapath — now measured
 
-This is the real one. Cilium's own `system_requirements` for v1.20.2 lists the
-following as *base* requirements, and this is our kernel (7.2.0) against them:
+`configs/k4s-cni.config` is the fragment: Cilium's documented requirements plus
+the gates that make them reachable. It builds and it boots. This is what it
+costs.
 
-| Required | Ours |
-| --- | --- |
-| `CONFIG_BPF`, `CONFIG_BPF_SYSCALL`, `CONFIG_BPF_JIT` | yes |
-| `CONFIG_CGROUPS`, `CONFIG_CGROUP_BPF` | yes |
-| `CONFIG_PERF_EVENTS` | yes |
-| **`CONFIG_NET_CLS_BPF`** | **missing** |
-| **`CONFIG_NET_SCH_INGRESS`** | **missing** |
-| **`CONFIG_NET_CLS_ACT`** | **missing** |
-| **`CONFIG_DEBUG_INFO_BTF`** | **missing** |
-| `CONFIG_BPF_EVENTS` | missing |
-| `CONFIG_CRYPTO_SHA1` | missing |
-| `CONFIG_SCHEDSTATS` | missing |
+| | bzImage | vmlinux | build time |
+| --- | --- | --- | --- |
+| the node kernel today | 3.04 MiB | 16 MiB | 100s |
+| the fragment, without BTF | 3.40 MiB | 16.8 MiB | 105s |
+| the fragment, **with** BTF | **4.31 MiB** | **180.8 MiB** | 137s |
 
-Cilium attaches its datapath with `tc` and BPF, so without `NET_CLS_BPF`,
-`NET_SCH_INGRESS` and `NET_CLS_ACT` it cannot attach a single program. Worse,
-our kernel has **`CONFIG_NET_SCHED` off**, and that is a `menuconfig`: the three
-options above live inside it (`net/sched/Kconfig:6`, with `NET_CLS_ACT` at 702,
-`NET_SCH_INGRESS` at 347), so they are not merely unset, they are invisible until
-`NET_SCHED` is turned on. This is the same trap as `SHMEM`, `BLOCK` and
-`VIRTIO_MENU` in `configs/k4s-tiny.config`: a menu option silently hiding the
-things that depend on it.
+Boot cost, measured as the time from QEMU start to the kernel handing off to
+userspace (`Run /init as init process`), five runs each:
 
-`CONFIG_DEBUG_INFO_BTF` is the second problem. It is a base requirement in
-v1.20.2, it needs `pahole` >= 1.22 on the build host (**not installed here**),
-and it generates BTF "from DWARF debug info" (`lib/Kconfig.debug:398`), so it
-also wants `CONFIG_DEBUG_INFO`, which `tinyconfig` turns off on purpose. That
-means a debug-info kernel build, not just one more line in the fragment.
-
-Beyond the base list, the features we would actually want each bring more:
-
-| Feature | Extra kernel config | Ours |
+| kernel | best | typical |
 | --- | --- | --- |
-| Tunneling (VXLAN is Cilium's default) | `VXLAN`, `GENEVE`, `FIB_RULES` | all missing |
-| Masquerading, default mode (iptables) | `NETFILTER_XT_SET`, `IP_SET`, `IP_SET_HASH_IP`, `NETFILTER_XT_MATCH_COMMENT` | all missing |
-| kube-proxy replacement | `NETFILTER_XT_TARGET_MARK`, `..._MATCH_MARK`, `..._MATCH_SOCKET`, `..._TARGET_CT`, `..._TARGET_TPROXY`, `NET_SCH_FQ`, `XFRM_USER`, `CRYPTO_AES/CBC/GCM/HMAC/SEQIV/AEAD/SHA256` | all missing |
-| IPsec | `XFRM`, `XFRM_OFFLOAD`, `XFRM_STATISTICS` | all missing |
-| Netkit device mode | `NETKIT` | missing |
+| the node kernel today | 1.60s | 1.75s |
+| the fragment, without BTF | 1.60s | 1.78s |
+| the fragment, with BTF | 1.81s | 1.84s |
 
-So this is not a one-line change; it is a decision about what the node's kernel
-is. Today the bzImage is **3.0 MiB** and the initramfs is **212.6 MiB**. The
-honest next step is to price it: add the options as a separate fragment
-(`configs/k4s-cni.config`), build, and measure bzImage size and boot time before
-committing to anything.
+So the node pays about **0.1s**, a few percent, and the initramfs next to it is
+227 MiB: the kernel is not what makes a diskless node slow to boot. What the
+fragment really costs is paid on the build host — pahole, and a debug-info build
+that leaves 181 MiB of vmlinux behind — and none of that reaches the node.
+
+### The list is not the list
+
+Cilium's list cannot be appended to `tinyconfig` and left at that. Four of its
+options silently do not take, and making them take means switching on whole
+subsystems its documentation never mentions, because every distribution kernel
+has them already:
+
+| Cilium asks for | What is really needed |
+| --- | --- |
+| `NET_CLS_ACT`, `NET_SCH_INGRESS`, `NET_CLS_BPF` | `NET_SCHED`, a menuconfig that hides all three |
+| `DEBUG_INFO_BTF` | a DWARF choice (`DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT`) with `DEBUG_INFO_NONE` off — `DEBUG_INFO` is not settable any more — plus pahole >= 1.22 on the build host, or Kconfig drops BTF without a word |
+| `FIB_RULES` | `IP_MULTIPLE_TABLES`, which selects it; the symbol itself has no prompt |
+| `BPF_EVENTS` | `KPROBE_EVENTS`, which lives inside `if FTRACE`, and `PERF_EVENTS` |
+| `CRYPTO_SHA1` | `CRYPTO` |
+| `IP_NF_FILTER`, `IP_NF_NAT` | `IP_NF_IPTABLES_LEGACY` and `NETFILTER_XTABLES_LEGACY` — `IP_NF_IPTABLES=y` alone gives an iptables with no tables in it |
+| `NETFILTER_XT_TARGET_TPROXY` | `IP_NF_MANGLE`, since TPROXY lives in the mangle table |
+| `NETFILTER_XT_TARGET_CT` | `IP_NF_RAW` |
+
+That table is the actual finding: the price of Cilium's kernel support is not
+the 15 options its documentation lists, it is those plus ten gates, and the
+gates are the part that fails silently. Two of the symbols it names are not even
+settable in a 7.2 kernel.
+
+To reproduce the numbers above, with pahole from the Ubuntu package unpacked
+into `/tmp/dwarves-root` (no root needed) and a separate build directory so the
+node kernel is left alone:
+
+```
+export PATH=/tmp/dwarves-root/usr/bin:$PATH    # needed by olddefconfig too
+make -C linux O=$PWD/build/kernel-cni tinyconfig
+cat configs/k4s-tiny.config configs/k4s-cni.config >> build/kernel-cni/.config
+make -C linux O=$PWD/build/kernel-cni olddefconfig
+make -C linux O=$PWD/build/kernel-cni -j$(nproc) bzImage
+```
 
 ## Blocker 2: `/lib/modules` does not exist in the image
 
@@ -176,8 +188,10 @@ second is much less work and is enough to exercise the datapath.
    itself, so a pod with a CNI address really runs in its own netns; flannel
    proved it and `make test-cluster` asserts the container's own view of its
    interface. See "what is not covered" in `docs/nsenter-and-runc.md`.
-1. **Decide whether the kernel may grow**, and price it with a separate fragment
-   before anything else. Everything below is cheap; this is the decision.
+1. ~~**Decide whether the kernel may grow.**~~ **Priced (2026-10-05):** the
+   fragment is `configs/k4s-cni.config`, and it costs 1.26 MiB of bzImage and
+   about 0.1s of boot. The decision is now about the build host (pahole, a
+   debug-info build) rather than the node.
 2. `mkdir -p /lib/modules` in the image.
 3. Make the harness able to run a DaemonSet: kube-controller-manager, or the
    kubeconfig-mount workaround.
