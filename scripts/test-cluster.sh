@@ -401,23 +401,15 @@ build_cilium() {
 
 # --- node image -------------------------------------------------------------
 splice_image() {
-	# Cilium writes this conflist itself, once its agent is ready -- but the CRI
-	# reads the config directory once, at startup, which is before that. An empty
-	# directory is ErrCNINotInitialized; a directory with flannel's conflist in
-	# it makes containerd cache the flannel plugin, and then every sandbox fails
-	# with "failed to load flannel 'subnet.env'", which is what this cost us. So
-	# put the same conflist Cilium will write there up front; the agent rewrites
-	# it identically when it becomes ready.
-	local extra=()
-	if [ "$CNI" = cilium ]; then
-		extra=(-files "$CONFIGS/05-cilium.conflist:etc/cni/net.d/05-cilium.conflist")
-	fi
-	log "splicing the node kubeconfig, ssh keys and CNI config into $NODE_IMAGE"
+	# Only the kubeconfig and the ssh keys. Cilium's conflist is *not* pre-placed:
+	# the agent writes it itself and containerd picks it up, which is what happens
+	# on any other node. Pre-placing it was a workaround for a race, and the race
+	# is better fixed where it happens -- see run_cilium.
+	log "splicing the node kubeconfig and ssh keys into $NODE_IMAGE"
 	./u-root/u-root -base "$BASE" -nocmd \
 		-files "$NODEDIR/kubeconfig:etc/kubernetes/kubeconfig" \
 		-files "$SSH/authorized_keys:etc/ssh/authorized_keys" \
 		-files "$SSH/host_rsa:etc/ssh/host_rsa" \
-		"${extra[@]}" \
 		-initcmd="" -defaultsh="" -o "$NODE_IMAGE" >/dev/null
 }
 
@@ -705,8 +697,25 @@ run_cilium() {
 	for i in $(seq 1 30); do
 		ready=$(K get daemonset cilium -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
 		if [ "${ready:-0}" = 1 ]; then
-			echo "cilium: ok (the agent is running on the node)"
-			return 0
+			# The agent is ready before it has written its CNI config -- the
+			# cni-config cell runs after the health endpoint is up -- and
+			# containerd's CRI loads that directory at init and *ignores Create
+			# events*, so a pod applied in that gap gets whatever was loaded at
+			# init: flannel's plugin, or nothing at all. Wait for the directory
+			# to say what the pods need before handing it any.
+			local c listing
+			for c in $(seq 1 30); do
+				listing=$(guest_get 'ls /etc/cni/net.d')
+				if printf '%s' "$listing" | grep -q 05-cilium.conflist &&
+					! printf '%s' "$listing" | grep -q 10-flannel.conflist; then
+					echo "cilium: ok (the agent is running, and its CNI config is on the node)"
+					return 0
+				fi
+				sleep 2
+			done
+			echo "cilium: FAILED (the agent is up but never wrote its CNI config)" >&2
+			diag
+			return 1
 		fi
 		# Bail as soon as the agent is visibly failing rather than waiting out
 		# the timeout: a crash-looping container backs off exponentially, so
