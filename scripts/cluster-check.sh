@@ -59,7 +59,7 @@ mount -t tmpfs tmpfs /var/log/pods
 
 # --- containerd -------------------------------------------------------------
 containerd </dev/null >/tmp/containerd.log 2>&1 &
-sleep 6
+i=0; while ! ctr version >/dev/null 2>&1 && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
 ctr version >/dev/null 2>&1 && echo "K4S_CHECK: ctr: ok" || echo "K4S_CHECK: ctr: fail"
 
 # --- kubelet ----------------------------------------------------------------
@@ -68,60 +68,25 @@ ctr version >/dev/null 2>&1 && echo "K4S_CHECK: ctr: ok" || echo "K4S_CHECK: ctr
 kubelet --config=/etc/kubernetes/kubelet.yaml --kubeconfig=/etc/kubernetes/kubeconfig --hostname-override=k4s-node-1 </dev/null >/tmp/kubelet.log 2>&1 &
 echo "K4S_CHECK: kubelet: started"
 
-# --- flannel ----------------------------------------------------------------
-# flanneld runs as a DaemonSet now (configs/node/flannel-ds.yaml, applied by the
-# harness once this node has registered), not as a process here. It takes a
-# subnet lease for this node out of the kube API and writes it to the host's
-# /run/flannel/subnet.env, which is where the CNI plugin -- /opt/cni/bin/flannel,
-# run by the runtime on the host -- reads it before delegating to bridge and
-# host-local.
-#
-# So all that is left here is to wait for the DaemonSet to have done its job.
-# That is also the ordering the pods need: nothing with a network namespace of
-# its own can start before that file exists.
-# Whichever CNI is in use: flannel writes a subnet file that its plugin reads,
-# Cilium writes its own CNI config and the agent installs the plugin. Wait for
-# either, because nothing with a network namespace of its own can start before
-# one of them exists.
-i=0; while [ ! -s /run/flannel/subnet.env ] && [ ! -e /etc/cni/net.d/05-cilium.conflist ] && [ $i -lt 60 ]; do sleep 2; i=$((i+1)); done
-echo "--- cni state ---"
-cat /run/flannel/subnet.env
-ls /etc/cni/net.d
+# --- the CNI ----------------------------------------------------------------
+# Nothing here waits for the CNI. Whether the CNI is up before the pods that
+# need it is the harness's business: it applies flannel or Cilium and waits for
+# it, then applies the pods. Waiting here as well was pure dead time, and on a
+# node where the CNI never came up it burned the whole timeout for nothing.
 
-# --- wait for the host to create the pod and the container to write ---------
-# Four looks at the same files, a minute apart, rather than one at the end:
-# when a check fails the harness kills this VM, so anything printed only at
-# the end is lost exactly when it is wanted. The CNI logs come with them.
-sleep 60
-echo "--- marker @60s ---"
+# --- the pods ---------------------------------------------------------------
+# Poll rather than sleep: a working node reaches the end of this in a couple of
+# seconds, and a broken one is bounded at three minutes. The deploy pod is the
+# last to appear, so waiting for it covers the others.
+i=0; while [ ! -s /var/log/k4s-deploy/result ] && [ $i -lt 30 ]; do sleep 2; i=$((i+1)); done
+echo "--- markers ---"
 cat /var/log/k4s-smoke/result
 cat /var/log/k4s-netns/result
 cat /var/log/k4s-ds/result
 cat /var/log/k4s-deploy/result
-cat /var/log/k4s-flannel/flannel.log
-cat /var/log/pods/*cilium-*/cilium-agent/*.log
-sleep 60
-echo "--- marker @120s ---"
-cat /var/log/k4s-smoke/result
-cat /var/log/k4s-netns/result
-cat /var/log/k4s-ds/result
-cat /var/log/k4s-deploy/result
-cat /var/log/k4s-flannel/flannel.log
-cat /var/log/pods/*cilium-*/cilium-agent/*.log
-sleep 60
-echo "--- marker @180s ---"
-cat /var/log/k4s-smoke/result
-cat /var/log/k4s-netns/result
-cat /var/log/k4s-ds/result
-cat /var/log/k4s-deploy/result
-cat /var/log/k4s-flannel/flannel.log
-cat /var/log/pods/*cilium-*/cilium-agent/*.log
-sleep 60
-echo "--- marker @240s ---"
-cat /var/log/k4s-smoke/result
-cat /var/log/k4s-netns/result
-cat /var/log/k4s-ds/result
-cat /var/log/k4s-deploy/result
+echo "--- stdout pod ---"
+cat /var/log/pods/*k4s-log*/log/*.log
+echo "--- cni logs ---"
 cat /var/log/k4s-flannel/flannel.log
 cat /var/log/pods/*cilium-*/cilium-agent/*.log
 
@@ -132,14 +97,19 @@ echo "--- containerd tail ---"
 tail -n 10 /tmp/containerd.log
 echo "--- containerd, cilium ---"
 grep cilium /tmp/containerd.log
+echo "--- stdout pod log ---"
+cat /var/log/pods/*k4s-log*/log/*.log
 echo "--- flannel log ---"
 cat /var/log/k4s-flannel/flannel.log
+cat /var/log/pods/*k4s-log*/log/*.log
 echo "--- agent log ---"
 ls /var/log/pods
 ls /var/log/pods/*cilium*/
 cat /var/log/pods/*cilium-*/cilium-agent/*.log
 echo "--- envoy log ---"
 cat /var/log/pods/*cilium-envoy-*/*/*.log
+echo "--- cilium images ---"
+ctr -n k8s.io images ls
 
 echo "K4S_CHECK_END"
 poweroff

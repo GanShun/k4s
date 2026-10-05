@@ -30,7 +30,6 @@ mount -t tmpfs tmpfs /var/lib/etcd
 
 # --- etcd -------------------------------------------------------------------
 etcd --data-dir /var/lib/etcd --listen-client-urls http://127.0.0.1:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster default=http://127.0.0.1:2380 </dev/null >/tmp/etcd.log 2>&1 &
-sleep 5
 
 # --- apiserver --------------------------------------------------------------
 # ServiceAccount admission is on here, unlike the host-side control plane this
@@ -42,7 +41,6 @@ sleep 5
 # that flag too until it was removed, and passing it here is now an error that
 # stops the apiserver from starting at all.
 kube-apiserver --etcd-servers=http://127.0.0.1:2379 --secure-port=6443 --bind-address=0.0.0.0 --tls-cert-file=/etc/kubernetes/pki/apiserver.crt --tls-private-key-file=/etc/kubernetes/pki/apiserver.key --client-ca-file=/etc/kubernetes/pki/ca.crt --service-account-key-file=/etc/kubernetes/pki/sa.pub --service-account-signing-key-file=/etc/kubernetes/pki/sa.key --service-account-issuer=https://10.0.2.2:6443 --service-cluster-ip-range=10.96.0.0/12 --authorization-mode=AlwaysAllow --allow-privileged=true </dev/null >/tmp/apiserver.log 2>&1 &
-sleep 15
 
 # --- controller-manager and scheduler ---------------------------------------
 # --allocate-node-cidrs is what gives a node its spec.podCIDR, which flannel
@@ -51,7 +49,6 @@ sleep 15
 # subnet length.
 kube-controller-manager --kubeconfig=/etc/kubernetes/admin.kubeconfig --allocate-node-cidrs=true --cluster-cidr=10.244.0.0/16 --node-cidr-mask-size=24 --service-cluster-ip-range=10.96.0.0/12 --service-account-private-key-file=/etc/kubernetes/pki/sa.key --root-ca-file=/etc/kubernetes/pki/ca.crt --leader-elect=false </dev/null >/tmp/controller-manager.log 2>&1 &
 kube-scheduler --kubeconfig=/etc/kubernetes/admin.kubeconfig --leader-elect=false </dev/null >/tmp/scheduler.log 2>&1 &
-sleep 10
 
 # --- diagnostics ------------------------------------------------------------
 echo "--- etcd log tail ---"

@@ -49,6 +49,7 @@ CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
 NETNS_POD=$CONFIGS/netns-pod.yaml
 DS=$CONFIGS/ds-pod.yaml
+LOGPOD=$CONFIGS/log-pod.yaml
 FLANNEL_DS=$CONFIGS/flannel-ds.yaml
 DEPLOY=$CONFIGS/deploy-pod.yaml
 BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-240}
@@ -58,6 +59,10 @@ BOOTS=${K4S_BOOTS:-2}
 # kernel built with configs/k4s-cni.config and a great deal more memory, so the
 # node VM is given more room there.
 CNI=${K4S_CNI:-flannel}
+# 1 reuses a control plane VM that is already up, and leaves it up, so that
+# repeated attempts at the node side cost a node boot instead of two VM boots
+# and a control plane image build.
+KEEP_CP=${K4S_KEEP_CP:-0}
 NODE_MEM=${K4S_NODE_MEM:-1536}
 CILIUM_VERSION=${K4S_CILIUM_VERSION:-1.20.2}
 HELM=${HELM:-helm}
@@ -67,6 +72,16 @@ ACCEL=()
 [ -w /dev/kvm ] && ACCEL=(-enable-kvm -cpu host)
 
 mkdir -p "$CP" "$NODEDIR"
+
+# One instance at a time. Two would fight over the port forward and over the
+# node VM's console log, which is exactly what happened when a stale run was
+# left waiting in its failure path: the new run's node booted into the same
+# boot1.log and neither could be read.
+exec 9>"$CP/.lock"
+if ! flock -n 9; then
+	echo "another test-cluster.sh is already running (lock: $CP/.lock)" >&2
+	exit 1
+fi
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
@@ -245,6 +260,10 @@ build_controlplane_image() {
 }
 
 cp_up() {
+	if [ "$KEEP_CP" = 1 ] && K get --raw=/healthz >/dev/null 2>&1; then
+		echo "apiserver: ok (reusing the control plane VM already running)"
+		return 0
+	fi
 	cp_down
 	# Anything already answering here would hold the port, make QEMU's forward
 	# fail, and then satisfy the health check below -- so the run would silently
@@ -458,14 +477,51 @@ run_cni() {
 # to be hostNetwork.
 run_cilium() {
 	log "applying Cilium"
+	# Remove flannel first. With K4S_KEEP_CP the control plane is reused, so its
+	# etcd still holds whatever the last run applied: a leftover flannel DaemonSet
+	# would come back on the new node and give this run two CNIs.
+	K delete daemonset k4s-flannel -n kube-system --ignore-not-found >/dev/null 2>&1 || true
 	K apply -f "$CILIUM_YAML" >/dev/null
-	local i ready
+	local i ready waiting lastwaiting=""
 	for i in $(seq 1 240); do
 		ready=$(K get daemonset cilium -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
 		if [ "${ready:-0}" = 1 ]; then
 			echo "cilium: ok (the agent is running on the node)"
 			return 0
 		fi
+		# Bail as soon as the agent is visibly failing rather than waiting out
+		# the timeout: a crash-looping container backs off exponentially, so
+		# the remaining minutes contain no information. Cilium's pods are
+		# created within seconds, which is the whole reason this is worth
+		# distinguishing from "slow".
+		# Only after the agent has had a chance, and only if the same reason
+		# shows up twice: right after the DaemonSet is applied, the pod status
+		# still describes the previous run's crash loop.
+		if [ "$i" -lt 15 ]; then
+			sleep 2
+			continue
+		fi
+		waiting=$(K get pods -n kube-system -l k8s-app=cilium \
+			-o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' 2>/dev/null || true)
+		if [ "$waiting" = "$lastwaiting" ]; then
+			case "$waiting" in
+			*CrashLoopBackOff*|*ImagePullBackOff*|*ErrImagePull*|*CreateContainerError*|*RunContainerError*)
+			echo "cilium: FAILED (agent $waiting) after $((i * 2))s" >&2
+			# Let the guest finish printing before the trap kills it: the
+			# interesting diagnostics are on the node, not here. Polled, so a
+			# guest that is already done costs nothing.
+			local g
+			for g in $(seq 1 80); do
+				grep -qa 'K4S_CHECK_END' "$CP/boot1.log" && break
+				sleep 2
+			done
+			K get pods -n kube-system -o wide 2>&1 | sed 's/^/  /' >&2
+				K describe pod -n kube-system -l k8s-app=cilium 2>&1 | tail -25 | sed 's/^/  /' >&2
+				return 1
+				;;
+			esac
+		fi
+		lastwaiting=$waiting
 		sleep 2
 	done
 	echo "cilium: FAILED (agent ready=${ready:-0})" >&2
@@ -507,6 +563,23 @@ run_flannel() {
 	return 1
 }
 
+# The stdout pod: it exists to answer whether the node captures container
+# output at all, so all that is checked here is that it runs. What it printed is
+# read from the guest's console.
+run_log_pod() {
+	local i ph
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-log -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			return 0
+		fi
+		sleep 2
+	done
+	echo "log pod: FAILED (phase ${ph:-none})" >&2
+	K describe pod k4s-log 2>&1 | tail -20 | sed 's/^/  /' >&2
+	return 1
+}
+
 # The DaemonSet controller and the scheduler both live in the control plane VM,
 # so these only become ready if it is doing its job: the DaemonSet controller
 # assigns its own node, and nothing pins the Deployment, so it needs the
@@ -515,6 +588,7 @@ run_workloads() {
 	log "applying a DaemonSet and a Deployment"
 	K apply -f "$DS" >/dev/null
 	K apply -f "$DEPLOY" >/dev/null
+	K apply -f "$LOGPOD" >/dev/null
 	local i ds deploy
 	for i in $(seq 1 120); do
 		ds=$(K get daemonset k4s-ds -o jsonpath='{.status.numberReady}' 2>/dev/null || true)
@@ -598,7 +672,7 @@ splice_image
 
 cleanup() {
 	kill "$(cat "$CP/qemu.pid" 2>/dev/null)" 2>/dev/null || true
-	cp_down
+	[ "$KEEP_CP" = 1 ] || cp_down
 }
 trap cleanup EXIT
 
@@ -626,6 +700,7 @@ echo "node: ok (registered and Ready)"
 run_pod
 run_netns_pod
 run_workloads
+run_log_pod
 wait_qemu
 check_marker "$CP/boot1.log"
 
