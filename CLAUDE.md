@@ -107,6 +107,8 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `scripts/controlplane-boot.sh` | Guest half of that test: the control plane VM's own boot |
 | `scripts/cluster-check.sh` | The guest half of that test, piped into gosh |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
+| `docs/testing.md` | What the two tests are, how a cluster test runs, and what the
+harness cost to get working |
 | `docs/nsenter-and-runc.md` | Why runc normally needs cgo, and the fork |
 | `docs/cilium.md` | Evaluating Cilium as the CNI: what the node lacks, and why the cost is mostly kernel |
 | `go.work` | Committed and load-bearing; see below |
