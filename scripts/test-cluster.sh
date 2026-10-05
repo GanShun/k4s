@@ -67,7 +67,6 @@ CNI=${K4S_CNI:-flannel}
 # 1 reuses a control plane VM that is already up, and leaves it up, so that
 # repeated attempts at the node side cost a node boot instead of two VM boots
 # and a control plane image build.
-KEEP_CP=${K4S_KEEP_CP:-0}
 NODE_MEM=${K4S_NODE_MEM:-1536}
 CILIUM_VERSION=${K4S_CILIUM_VERSION:-1.20.2}
 HELM=${HELM:-helm}
@@ -80,9 +79,8 @@ mkdir -p "$CP" "$NODEDIR"
 
 # One instance at a time. Two would fight over the port forward and over the
 # node VM's console log. Not a lock file: an flock fd is inherited by every
-# child, including the node VM, which K4S_KEEP_CP deliberately leaves running --
-# so the lock outlived the run and the next one could never start. A pid file
-# with a liveness check cannot go stale like that.
+# child, including the node VM -- so the lock outlived the run and the next one
+# could never start. A pid file with a liveness check cannot go stale like that.
 if [ -f "$CP/run.pid" ]; then
 	oldpid=$(cat "$CP/run.pid" 2>/dev/null || true)
 	if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
@@ -288,20 +286,25 @@ build_controlplane_image() {
 }
 
 cp_up() {
-	if [ "$KEEP_CP" = 1 ] && K get --raw=/healthz >/dev/null 2>&1; then
-		echo "apiserver: ok (reusing the control plane VM already running)"
-		return 0
-	fi
+	# Always a fresh control plane, and always stop whatever an earlier run left
+	# behind first. Reusing one was a speed hack, and it quietly made runs depend
+	# on each other: that VM's etcd keeps the last run's Node, pods, DaemonSets
+	# and CiliumNodes, so a run could pass or fail on another run's objects. A
+	# stale pod status makes the checks fire instantly and for the wrong reason,
+	# and a stale Node object makes "node: ok (registered)" meaningless because
+	# it reports a Node that a previous node VM registered.
 	cp_down
-	# Anything already answering here would hold the port, make QEMU's forward
-	# fail, and then satisfy the health check below -- so the run would silently
-	# test against a stale control plane instead of this VM. That is not
-	# hypothetical: a leftover host-side control plane from before this became a
-	# VM did exactly that, and the pods that should have been scheduled by the
-	# scheduler in the VM sat Pending against a control plane that has none.
+	local i
+	for i in $(seq 1 15); do
+		K get --raw=/healthz >/dev/null 2>&1 || break
+		sleep 1
+	done
+	# If something still answers, it is not a VM this script knows how to stop,
+	# and testing against it would be worse than failing: QEMU's forward would
+	# fail and the health check below would be satisfied by the stale one.
 	if K get --raw=/healthz >/dev/null 2>&1; then
 		echo "something is already serving 127.0.0.1:$PORT" >&2
-		echo "a stale control plane from an earlier run? stop it before running this test" >&2
+		echo "and it is not a control plane VM this script started" >&2
 		exit 1
 	fi
 	log "booting the control plane VM"
@@ -486,6 +489,25 @@ watchdog() {
 	kill -9 "$pid" 2>/dev/null || true
 }
 
+# The guest is not asked to power itself off, and this does not wait for it to
+# exit. It used to, and that made the guest's own idea of when it had finished
+# race every check the harness makes: the guest would shut down as soon as its
+# script ended, while the harness was still applying pods and waiting for them,
+# so the files read afterwards were empty and the VM was gone. The harness knows
+# when it is done -- it is the one waiting for the markers -- so it reads what it
+# needs over ssh and then stops the VM.
+stop_guest() {
+	local pid
+	pid=$(cat "$CP/qemu.pid" 2>/dev/null || true)
+	[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+	local i
+	for i in $(seq 1 10); do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 1
+	done
+	kill -9 "$pid" 2>/dev/null || true
+}
+
 wait_qemu() {
 	local pid i
 	pid=$(cat "$CP/qemu.pid")
@@ -534,6 +556,25 @@ wait_ssh() {
 # moment to be caught, catting one to a 115200-baud line takes minutes, and
 # handing the console too much at once corrupts the guest's own script. A file
 # that is read does not have to be printed at any particular moment at all.
+# Pull everything the checks and the diagnostics need out of the guest while it
+# is still up, and keep it on the host. This is the reason sshd is in the image:
+# the serial console cannot be trusted with bulk output, a log takes minutes to
+# print at 115200 baud, and a file that is read does not have to be printed at
+# the right moment to be caught. Quiet -- diag() prints the summary.
+collect() {
+	local d=$CP/diag m
+	mkdir -p "$d" "$CP/markers"
+	for m in smoke netns ds deploy; do
+		guest_get "cat /var/log/k4s-$m/result 2>/dev/null" > "$CP/markers/$m"
+	done
+	guest_get 'cat /var/log/pods/*k4s-log*/log/*.log 2>/dev/null' > "$CP/markers/log"
+	for m in kubelet.log containerd.log sshd.log; do
+		guest_get "cat /tmp/$m" > "$d/$m" 2>/dev/null || true
+	done
+	guest_get 'cat /var/log/pods/*cilium-*/cilium-agent/*.log' > "$d/cilium-agent.log" 2>/dev/null || true
+	guest_get 'ls /etc/cni/net.d; ls /opt/cni/bin' > "$d/cni-files" 2>/dev/null || true
+}
+
 diag() {
 	local d=$CP/diag m
 	mkdir -p "$d"
@@ -584,10 +625,9 @@ wait_node() {
 	return 1
 }
 
-# Delete a workload before applying it. With K4S_KEEP_CP the control plane is
-# reused, so the objects survive from the last run along with their statuses: a
-# stale "Running" makes the checks below pass or fail instantly and for the wrong
-# reason, and a stale pod IP is not this run's pod IP.
+# Delete a workload before applying it. Runs are self-contained now, so this is
+# belt and braces rather than the load-bearing thing it was when a reused
+# control plane could hand back a previous run's status.
 reapply() {
 	K delete -f "$1" --ignore-not-found >/dev/null 2>&1 || true
 	K apply -f "$1" >/dev/null
@@ -656,9 +696,9 @@ run_cni() {
 # to be hostNetwork.
 run_cilium() {
 	log "applying Cilium"
-	# Remove flannel first. With K4S_KEEP_CP the control plane is reused, so its
-	# etcd still holds whatever the last run applied: a leftover flannel DaemonSet
-	# would come back on the new node and give this run two CNIs.
+	# Remove flannel first. Runs are self-contained now, so a fresh control plane
+	# has no flannel in it, but a DaemonSet left over from a failed earlier apply
+	# in this same run would come back on the new node and give it two CNIs.
 	K delete daemonset k4s-flannel -n kube-system --ignore-not-found >/dev/null 2>&1 || true
 	K apply -f "$CILIUM_YAML" >/dev/null
 	local i ready waiting lastwaiting=""
@@ -779,56 +819,47 @@ run_workloads() {
 }
 
 check_marker() {
-	local clean
-	clean=$(mktemp -t k4s-clean.XXXXXX)
-	sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$1" | grep -v '^\$ ' > "$clean" || true
-	if ! grep -q 'K4S_POD_OK' "$clean"; then
-		echo "pod: FAILED (no K4S_POD_OK in the guest log, $1)" >&2
-		tail -50 "$clean" >&2
-		rm -f "$clean"
+	local m=$CP/markers
+	if ! grep -q 'K4S_POD_OK' "$m/smoke" 2>/dev/null; then
+		echo "pod: FAILED (the smoke pod did not write K4S_POD_OK)" >&2
+		sed 's/^/  /' "$m/smoke" >&2
 		return 1
 	fi
-	# The container reports Seccomp: 2 (SECCOMP_MODE_FILTER) only if a filter
-	# is actually installed, so this is the assertion that the cgo-free runc
+	# The container reports Seccomp: 2 (SECCOMP_MODE_FILTER) only if a filter is
+	# actually installed, so this is the assertion that the cgo-free runc
 	# enforced the profile rather than merely starting the container.
-	if ! grep -qE 'Seccomp:[[:space:]]+2' "$clean"; then
+	if ! grep -qE 'Seccomp:[[:space:]]+2' "$m/smoke"; then
 		echo "seccomp: FAILED (container not running under a seccomp filter)" >&2
-		tail -30 "$clean" >&2
-		rm -f "$clean"
+		sed 's/^/  /' "$m/smoke" >&2
 		return 1
 	fi
-	if ! grep -q 'K4S_NETNS_OK' "$clean"; then
-		echo "netns pod: FAILED (no K4S_NETNS_OK: the pod that needs a CNI did not run, $1)" >&2
-		tail -50 "$clean" >&2
-		rm -f "$clean"
+	if ! grep -q 'K4S_NETNS_OK' "$m/netns" 2>/dev/null; then
+		echo "netns pod: FAILED (the pod that needs a CNI did not run)" >&2
+		sed 's/^/  /' "$m/netns" >&2
 		return 1
 	fi
-	if ! grep -qE 'inet[[:space:]]+10\.244\.' "$clean"; then
+	if ! grep -qE 'inet[[:space:]]+10\.244\.' "$m/netns"; then
 		echo "netns pod: FAILED (the container is not in the pod's network namespace)" >&2
-		echo "  the CRI gave the sandbox an address, but the container reports this interface:" >&2
-		grep -a -A2 'K4S_NETNS_OK' "$clean" | sed 's/^/    /' >&2 || true
-		echo "  cause: the cgo-free runc does not join namespaces given by path, so the" >&2
-		echo "  container inherits the host's. See docs/nsenter-and-runc.md." >&2
-		rm -f "$clean"
+		echo "  the CRI gave the sandbox an address, but the container reports:" >&2
+		sed 's/^/    /' "$m/netns" >&2
+		echo "  cause: the cgo-free runc does not join namespaces given by path, so" >&2
+		echo "  the container inherits the host's. See docs/nsenter-and-runc.md." >&2
 		return 1
 	fi
-	if ! grep -q 'K4S_DS_OK' "$clean"; then
-		echo "daemonset: FAILED (the DaemonSet pod never wrote its marker, $1)" >&2
-		tail -40 "$clean" >&2
-		rm -f "$clean"
+	if ! grep -q 'K4S_DS_OK' "$m/ds" 2>/dev/null; then
+		echo "daemonset: FAILED (the DaemonSet pod never wrote its marker)" >&2
+		sed 's/^/  /' "$m/ds" >&2
 		return 1
 	fi
-	if ! grep -q 'K4S_DEPLOY_OK' "$clean"; then
-		echo "deployment: FAILED (the Deployment pod never wrote its marker, $1)" >&2
-		tail -40 "$clean" >&2
-		rm -f "$clean"
+	if ! grep -q 'K4S_DEPLOY_OK' "$m/deploy" 2>/dev/null; then
+		echo "deployment: FAILED (the Deployment pod never wrote its marker)" >&2
+		sed 's/^/  /' "$m/deploy" >&2
 		return 1
 	fi
 	echo "pod: ok (container wrote its marker)"
 	echo "seccomp: ok (container runs under a filter)"
 	echo "netns pod: ok (container has an address on eth0 from the CNI)"
 	echo "workloads: ok (both controller-created pods wrote their markers)"
-	rm -f "$clean"
 	return 0
 }
 
@@ -846,7 +877,7 @@ splice_image
 
 cleanup() {
 	kill "$(cat "$CP/qemu.pid" 2>/dev/null)" 2>/dev/null || true
-	[ "$KEEP_CP" = 1 ] || cp_down
+	cp_down
 }
 trap cleanup EXIT
 
@@ -878,8 +909,9 @@ run_pod
 run_netns_pod
 run_workloads
 run_log_pod
-wait_qemu
-check_marker "$CP/boot1.log"
+collect
+stop_guest
+check_marker
 
 for n in $(seq 2 "$BOOTS"); do
 	log "reboot: same node image, it must rejoin and the pod must come back"
@@ -905,8 +937,9 @@ for n in $(seq 2 "$BOOTS"); do
 	# out. The control plane VM kept running throughout, which is the point.
 	run_netns_pod
 	run_workloads
-	wait_qemu
-	check_marker "$CP/boot$n.log"
+	collect
+	stop_guest
+	check_marker
 done
 
 echo

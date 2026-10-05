@@ -111,5 +111,6 @@ cat /var/log/k4s-deploy/result
 cat /var/log/pods/*k4s-log*/log/*.log
 
 echo "K4S_CHECK_END"
-# Deliberately no poweroff: the harness reads the node over ssh after this, so
-# the guest has to still be there. The harness kills the VM when it is done.
+# Deliberately no poweroff. The harness reads the markers and the logs out of
+# this guest over ssh, and it decides when the run is over; a guest that shuts
+# itself down races every check the harness makes.
