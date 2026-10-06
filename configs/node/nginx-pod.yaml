@@ -1,0 +1,46 @@
+# An off-the-shelf stateless workload: stock nginx, unmodified.
+#
+# The other pods in this directory prove the *runtime* works -- that a container
+# starts, that it runs under a seccomp filter, that the CRI gives it a pod
+# address. This one proves a *published image* works: nginx exactly as its
+# maintainers ship it, with its own entrypoint, its own userspace, and no k4s
+# code in it at all.
+#
+# It is also the only pod here that has to *serve* rather than merely run, and
+# that shapes how it is verified. nginx has no shell command to hang a marker
+# off and writes nothing to a hostPath, so there is no file to read back the way
+# the other pods do. The node fetches the page from the pod's address over the
+# flannel bridge instead -- one assertion covering the whole path: registry
+# pull, image unpack, container start, pod network, and the server answering.
+#
+# Pinned to a version tag, as the other pods here are. The digest that tag
+# resolved to when this test was written was
+# sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-nginx
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  # Always, as with the other pods: the node is diskless, so a reboot wipes
+  # containerd's state and kubelet has to recreate the container. That the
+  # workload comes back after a reboot is part of what this test asserts.
+  restartPolicy: Always
+  containers:
+    - name: nginx
+      image: docker.io/library/nginx:1.31-alpine
+      # Informational. There is no kube-proxy and no service routing on this
+      # node, so nothing acts on this port; it documents the intent.
+      ports:
+        - containerPort: 80
+      # A readiness probe, so kubelet itself checks that the server answers
+      # before the pod reports Ready. The harness waits for Ready as well as
+      # Running, which makes "nginx is serving" something the node asserts
+      # about itself rather than only something the harness observes.
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 80
+        initialDelaySeconds: 2
+        periodSeconds: 5

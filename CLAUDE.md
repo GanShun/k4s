@@ -44,7 +44,8 @@ package) at configure and build time for `CONFIG_DEBUG_INFO_BTF`; if it is not o
 generates throwaway PKI, boots a **control plane VM** (etcd, apiserver,
 controller-manager, scheduler) and then the node twice (join, then
 reboot-and-rejoin). It prints `node: ok`, `flannel: ok` or `cilium: ok`,
-`pod: ok`, `netns pod: ok`, `daemonset: ok`, `deployment: ok`, `cluster: ok`.
+`pod: ok`, `seccomp: ok`, `netns pod: ok`, `nginx: ok`, `daemonset: ok`,
+`deployment: ok`, `workloads: ok`, `cluster: ok`.
 `K4S_BOOTS` (default 2) sets the number of boots. Both VMs are killed on exit.
 
 Every run is self-contained: it stops any control plane VM left by an earlier run

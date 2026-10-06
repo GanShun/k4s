@@ -70,6 +70,7 @@ CP_IMAGE=$CP/controlplane-image.cpio
 CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
 NETNS_POD=$CONFIGS/netns-pod.yaml
+NGINX_POD=$CONFIGS/nginx-pod.yaml
 DS=$CONFIGS/ds-pod.yaml
 LOGPOD=$CONFIGS/log-pod.yaml
 FLANNEL_DS=$CONFIGS/flannel-ds.yaml
@@ -594,6 +595,21 @@ collect() {
 		guest_get "cat /var/log/k4s-$m/result 2>/dev/null" > "$CP/markers/$m"
 	done
 	guest_get 'cat /var/log/pods/*k4s-log*/log/*.log 2>/dev/null' > "$CP/markers/log"
+	# The off-the-shelf pod has no marker to read: nginx has no shell command to
+	# hang one off and writes nothing to a hostPath. The node fetches its page
+	# over the pod network instead, which is also the assertion that the pod
+	# network carries real traffic and not just that an interface has an
+	# address.
+	#
+	# Through a file, not `-O -`: wget maps `-O -` to /dev/stdout, and /dev here
+	# is a bare devtmpfs with no udev, so /dev/stdout does not exist and the
+	# write fails silently. wget's stderr is kept in the marker on purpose, so a
+	# failure here says why instead of leaving an empty file.
+	local ngip
+	ngip=$(K get pod k4s-nginx -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+	if [[ -n "$ngip" ]]; then
+		guest_get "wget -O /tmp/k4s-nginx.html http://$ngip/ 2>&1; echo '--- page ---'; cat /tmp/k4s-nginx.html 2>&1" > "$CP/markers/nginx"
+	fi
 	for m in kubelet.log containerd.log sshd.log; do
 		guest_get "cat /tmp/$m" > "$d/$m" 2>/dev/null || true
 	done
@@ -703,6 +719,39 @@ run_netns_pod() {
 	done
 	echo "netns pod: FAILED (never reached Running)" >&2
 	K describe pod k4s-netns 2>&1 | tail -25 | sed 's/^/  /' >&2
+	diag
+	return 1
+}
+
+# An off-the-shelf workload: stock nginx, pulled from a public registry and run
+# as its maintainers shipped it. It is the only pod here that has to *serve*
+# rather than merely run, and it is the only one with no marker to read back --
+# nginx has no shell command to hang one off and writes nothing to a hostPath.
+# So this waits for the pod, and the fetch that proves it answers happens over
+# ssh while the guest is still up (see collect and check_marker).
+#
+# Ready, not just Running: the pod spec carries a readiness probe, so kubelet
+# itself has fetched the page before this returns. That makes "nginx is serving"
+# something the node asserts about itself rather than only something the harness
+# observes from outside.
+run_nginx() {
+	log "applying the off-the-shelf nginx pod"
+	reapply "$NGINX_POD"
+	local i ph ready ip
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-nginx -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		ready=$(K get pod k4s-nginx \
+			-o jsonpath='{.status.containerStatuses[0].ready}' \
+			2>/dev/null || true)
+		if [ "$ph" = Running ] && [ "$ready" = true ]; then
+			ip=$(K get pod k4s-nginx -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+			echo "nginx pod: Running and Ready at ${ip:-<none>}"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "nginx pod did not become Running and Ready" >&2
+	K describe pod k4s-nginx 2>&1 | tail -25 | sed 's/^/  /' >&2
 	diag
 	return 1
 }
@@ -920,10 +969,19 @@ check_marker() {
 		sed 's/^/  /' "$m/deploy" >&2
 		return 1
 	fi
+	# The off-the-shelf pod. The only check here that is about a *published
+	# image* serving rather than about k4s code running: stock nginx, fetched by
+	# the node over the pod network.
+	if ! grep -qi 'Welcome to nginx' "$m/nginx" 2>/dev/null; then
+		echo "nginx: FAILED (the node could not fetch the page from the pod)" >&2
+		head -c 400 "$m/nginx" 2>/dev/null | sed 's/^/  /' >&2
+		return 1
+	fi
 	echo "pod: ok (container wrote its marker)"
 	echo "seccomp: ok (container runs under a filter)"
 	echo "netns pod: ok (container has an address on eth0 from the CNI)"
 	echo "workloads: ok (both controller-created pods wrote their markers)"
+	echo "nginx: ok (the node fetched stock nginx's page over the pod network)"
 	return 0
 }
 
@@ -974,6 +1032,7 @@ echo "node: ok (registered and Ready)"
 # together are the whole statement about this node's networking.
 run_pod
 run_netns_pod
+run_nginx
 run_workloads
 run_log_pod
 collect
@@ -1003,6 +1062,7 @@ for n in $(seq 2 "$BOOTS"); do
 	# their own; this waits for them and re-checks the addresses the CNI hands
 	# out. The control plane VM kept running throughout, which is the point.
 	run_netns_pod
+	run_nginx
 	run_workloads
 	collect
 	stop_guest

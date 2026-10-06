@@ -125,9 +125,20 @@ at all. The runc fork now compiles profiles in Go (see
 `docs/nsenter-and-runc.md`), and the smoke pod asserts that the container reports
 `Seccomp: 2`.
 
-Still open from M1: the smoke pod is `hostNetwork: true` because CNI is
-undecided, and the pod is pinned with `nodeName` because the throwaway control
-plane has no scheduler.
+The smoke pod is still `hostNetwork: true`, but no longer because CNI is
+undecided: the CNI is chosen, and `netns-pod.yaml` is the pod that covers it. It
+stays hostNetwork because it is the runtime test rather than the network test.
+The pods are still pinned with `nodeName`, which is now a leftover rather than a
+constraint — the control plane VM has a scheduler, and the DaemonSet and the
+Deployment exercise scheduling separately.
+
+M1 also runs an **off-the-shelf** image, which is a different kind of evidence
+from the busybox pods. Stock `nginx:1.31-alpine`, pulled from docker.io, with its
+own entrypoint and its own default config and no k4s code in it. The busybox pods
+show that the runtime starts something; nginx shows that a real distribution's
+userspace survives this kernel and this runtime, and that the node can serve a
+workload someone else built. M3 asks the same question of a vLLM image, so it is
+worth having answered early. See `docs/testing.md`.
 
 ### Networking: from no CNI to flannel, and the bug in between (2026-10-05)
 
@@ -217,10 +228,111 @@ openssl with two subcommands, and cost nothing at runtime. It is a like-for-like
 swap rather than an obvious win, since `gen_pki` already works and is cached
 across runs.
 
+### Node credentials: a bootstrap token, not a baked kubeconfig (2026-10-06)
+
+Three credentials are in play, and only one of them is hard.
+
+- The **cluster CA certificate** is public. It belongs in the shared image.
+- The **kubelet client certificate** is the working credential. It should be
+  issued *by* the cluster, never shipped.
+- The **bootstrap credential** — proof that a machine may join — is the only thing
+  that must be per-node, or at least per-cohort, and short-lived.
+
+Today the node gets none of this right: `gen_pki` pre-issues a `kubelet.crt` and
+`kubelet.key`, the harness splices them into a copy of the initramfs, and the node
+boots holding a long-lived cluster credential. That works for a two-node test and
+is the wrong shape for a fleet.
+
+**Rejected: per-worker initramfs.** This is what the test does now, generalised. A
+fleet of thousands means thousands of ~230 MB artifacts to build, store and serve,
+all of them rebuilt on every credential rotation or kernel bump, each carrying a
+cluster credential in the boot medium — which on a netboot fleet is usually the
+least protected part of the infrastructure. The softer variant is worth keeping in
+mind: one shared image carrying a low-privilege *bootstrap token* instead of a
+client certificate, which is expirable, revocable, and can cover a cohort. That is
+most of the way to the answer below.
+
+**Rejected: ssh-drop after boot.** It moves the bootstrap problem rather than
+solving it. Authenticating *into* each node needs either host-key trust on first
+contact (unsafe at fleet scale) or a fleet-wide ssh CA in the image that can write
+to every node — recreating the fleet-wide credential this design is trying to
+avoid. It also inverts a pull into a push: no orchestrator, no fleet, and boot
+time becomes push latency. Fine as a test mechanism, wrong as the production one.
+
+**Chosen: TLS bootstrapping, with the token delivered by the boot protocol.** The
+shared image carries the CA certificate (public), the apiserver address, and the
+mechanism. kubelet starts with `--bootstrap-kubeconfig`, submits a CSR, the
+controller-manager's approver checks the token's group and auto-approves, and
+kubelet writes its own certificate to RAM and renews it from then on. Nothing
+per-node is baked into an image and nothing is pushed into a running guest.
+
+That reduces the problem to one question: how does the token reach a netbooted
+node? The structural answer is that the boot protocol already carries per-node
+identity — the DHCP/PXE server knows the MAC. Three shapes, in increasing order of
+infrastructure:
+
+1. **Per-MAC iPXE or kernel cmdline.** The boot server serves a per-node script
+   carrying a short-lived token; uinit reads the cmdline and fetches from a URL.
+   No new services. The exposure is console-readable, which a short-lived,
+   low-privilege token tolerates.
+2. **A metadata service.** The node fetches a config URL, identifying itself by
+   MAC. This is the cloud-init/Ignition shape; Ignition is the closest prior art,
+   designed for disposable netbooted machines that need per-machine config. Costs
+   one small service to run and keep available.
+3. **Attestation (TPM EK / Secure Boot).** The node proves its identity
+   cryptographically and there is no shared secret to deliver. This is the
+   direction if the boot network itself is not trusted. It replaces only the token
+   fetch — everything downstream is identical — so it can be deferred without
+   changing the node's flow later.
+
+**Disklessness makes this cheaper, not harder.** Strict RAM-only already means
+every boot re-fetches everything and nothing survives a reboot. A credential is
+just another thing to re-fetch, so **every reboot is a credential rotation for
+free** — no expiry bookkeeping, no rotation job, no stale certificate on a disk.
+The cost that normally argues against short-lived certificates, "the node has to
+re-bootstrap on every boot", is a cost this design has already paid. Short-lived
+plus re-bootstrap is *simpler* here than the diskful equivalent, not harder.
+
+**The boot channel is the trust root, and that is true of every option above.** If
+the kernel and initramfs arrive over unauthenticated TFTP or plain HTTP, a token
+fetched over that same channel is equally unauthenticated — the secret is moved,
+not protected. Short of attestation, the mitigations are serving the image and the
+config over HTTPS with a pinned certificate, or keeping netboot on a private L2
+segment.
+
+What changes, concretely:
+
+- DIT bakes the public anchor into the shared image: cluster CA certificate and
+  apiserver address. No secrets.
+- `uinit` gains one step before kubelet: obtain the token, write
+  `/run/kubelet-bootstrap.kubeconfig` on tmpfs, and start kubelet with
+  `--bootstrap-kubeconfig` and `--kubeconfig=/run/kubelet.kubeconfig`.
+- The apiserver gets a bootstrap token; the controller-manager's approver and
+  signer are on by default. RBAC needs `system:bootstrappers` bound to
+  `system:node-bootstrapper` and the nodeclient auto-approval role.
+- The harness stops splicing a kubeconfig and mints a token instead, shrinking the
+  splice to one short string — a test-side simplification as much as a production
+  one.
+- Node naming must be stable across reboots — DMI/SMBIOS UUID, TPM EK, or the boot
+  config — or Node objects and CSRs accumulate.
+
+First step, small, and against the cluster that already exists: have `gen_pki`
+mint a bootstrap token and bind those two roles, point kubelet at
+`--bootstrap-kubeconfig`, and watch the node appear through a CSR instead of
+through a spliced certificate. That exercises the whole path without touching the
+image.
+
+Sizing note before committing: every boot is a CSR and possibly a Node object.
+Stable names plus the existing `csrcleaner` handle it, but the volume is worth
+measuring at fleet scale.
+
 ### M2 — Ephemeral hygiene and the kill switch
 
 - tmpfs and eviction policy, log shipping, watchdog/EPO integration, and the
-  node-compromise credential-rotation runbook.
+  node-compromise credential-rotation runbook. The rotation runbook is much
+  smaller once the node holds nothing longer-lived than a boot.
+- Node credentials: TLS bootstrap with a token from the boot protocol, replacing
+  the spliced kubeconfig — see the section above.
 
 ### M3 — GPU
 
@@ -286,7 +398,9 @@ make it generate-able so it never exists in a broken state.
   target. Needs a measured answer before M3.
 - iPXE HTTPS trust model and image signature verification.
 - CNI choice and behaviour across a WAN.
-- Node identity and bootstrap-credential lifecycle (no shared token in an
-  image).
+- Node identity and the bootstrap-credential lifecycle. The direction is settled
+  above — TLS bootstrap, a token from the boot protocol, no secret in an image —
+  but which of the three delivery shapes is not, and that depends on how far the
+  netboot channel is trusted.
 - Kernel/module signing for Secure Boot with NVIDIA modules.
 - Scale: nodes per site, link speed, reboot-storm tolerance.

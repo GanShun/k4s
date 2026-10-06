@@ -114,11 +114,26 @@ while the harness is still applying pods — which used to race every check.
 and contains no pod startup logic at all.**
 
 The workloads are plain YAML in `configs/node/`: `smoke-pod.yaml`,
-`netns-pod.yaml`, `ds-pod.yaml`, `deploy-pod.yaml`, `log-pod.yaml`,
-`flannel-ds.yaml`. The harness applies each one with `kubectl` against the
-control plane VM's apiserver (`reapply`, which deletes first so a stale status
-can never drive a check), and the controllers do the rest — the scheduler places
-the Deployment, the controller-manager runs the DaemonSet.
+`netns-pod.yaml`, `nginx-pod.yaml`, `ds-pod.yaml`, `deploy-pod.yaml`,
+`log-pod.yaml`, `flannel-ds.yaml`. The harness applies each one with `kubectl`
+against the control plane VM's apiserver (`reapply`, which deletes first so a
+stale status can never drive a check), and the controllers do the rest — the
+scheduler places the Deployment, the controller-manager runs the DaemonSet.
+
+Every one of those except `nginx-pod.yaml` carries k4s code, or a marker to write
+and read back. nginx is the **off-the-shelf** one: stock `nginx:1.31-alpine` from
+docker.io, its own entrypoint and its own default config, no k4s code in it, and
+nothing to read back — it has no shell command to hang a marker off and writes
+nothing to a hostPath. It is checked two ways instead. kubelet's readiness probe
+fetches `/` before the pod reports Ready, so "the server answers" is something the
+node asserts about itself; and the node fetches the page over the pod network
+while ssh is still up, which is a single assertion covering the registry pull, the
+image unpack, the container start, the pod network and the HTTP response.
+
+That fetch goes through a file, not `wget -O -`: `-O -` resolves to `/dev/stdout`,
+and `/dev` here is a bare devtmpfs with no udev, so that path does not exist and
+the write fails silently — leaving an empty marker and no reason why. wget's
+stderr is kept in the marker for the same reason.
 
 The node's bring-up ends at "kubelet is running". Everything after that is
 Kubernetes doing its job, which is the point: if the test deployed pods by
