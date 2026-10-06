@@ -137,6 +137,13 @@ mkdir -p build
 (cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
 	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=v1.35.8" \
 	-o ../build/kubelet ./cmd/kubelet)
+# The node's own bring-up, installed as /bin/uinit and run by u-root's init.
+# It is a program rather than a script fed to the guest's shell because gosh is
+# not bash and the serial console is a poor transport for a program; see the
+# comment at the top of cmd/uinit/main.go. GOWORK=off because it is its own
+# module and is not a member of the workspace.
+(cd cmd/uinit && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS go build \
+	-o ../../build/uinit .)
 # The CNI plugin set.
 #
 # loopback is required whichever CNI is chosen: the CRI synthesises a loopback
@@ -167,6 +174,7 @@ CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \
 	-files build/runc:bin/runc \
 	-files build/kubelet:bin/kubelet \
+	-files build/uinit:bin/uinit \
 	-files "$CA_BUNDLE":etc/ssl/certs/ca-certificates.crt \
 	-files configs/node/kubelet.yaml:etc/kubernetes/kubelet.yaml \
 	-files configs/node/passwd:etc/passwd \

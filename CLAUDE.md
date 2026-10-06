@@ -149,7 +149,7 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |
 | `scripts/controlplane-boot.sh` | Guest half of that test: the control plane VM's own boot |
-| `scripts/cluster-check.sh` | Guest half of that test: the node's own bring-up, fed to gosh |
+| `cmd/uinit/` | The node's own bring-up, installed as `/bin/uinit` and run by u-root's init |
 | `scripts/clone-linux.sh` | Clones the pinned kernel checkout for `make linux` |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/testing.md` | What the two tests are, how a cluster test runs, and what the
@@ -195,13 +195,17 @@ the `bb` binary itself and loses the applet name:
 - `runc` — `exec.Command(exePath, "init")` for the container init
 - `kubelet` — one large binary, not an applet
 
+A fourth file is added the same way for a different reason: `uinit` is not a
+u-root applet at all, but the node's own bring-up program, which u-root's init
+runs from `/bin/uinit`.
+
 All three are built `CGO_ENABLED=0` and added with `-files`. `runc` comes from
 the fork (see below); `kubelet` is built with `-mod=vendor` and an ldflags
 version stamp (`k8s.io/component-base/version.gitVersion=v1.35.8`).
 
 **4. Assemble.** `./u-root/u-root` with `u-root/cmds/core/*`,
 `./containerd/cmd/containerd`, `./containerd/cmd/ctr`, `./flannel`,
-`./coredns`, `./etcd/etcdctl`, plus the three `-files`.
+`./coredns`, `./etcd/etcdctl`, plus the four `-files`.
 
 ### go.work is committed and load-bearing
 
@@ -237,35 +241,45 @@ Fragment entries that are load-bearing and non-obvious:
 
 ## Test harness
 
-Two tests, and they feed the guest differently on purpose.
+Two tests. `make test` feeds its guest a script; `make test-cluster` feeds the
+node nothing.
 
 `scripts/test-boot.sh <kernel> <initramfs> [guest-script]` (behind `make test`)
 boots QEMU with `-nographic` and pipes `scripts/guest-check.sh` into the guest's
 stdin. u-root's `gosh` treats a non-tty stdin as a script, so **every line of
-`guest-check.sh` must be a complete command** — no multi-line `if`/`for` blocks,
-and keep lines short enough not to wrap on the serial console.
+`guest-check.sh` must be a complete command** — no multi-line `if`/`for` blocks —
+and lines must stay short, because the console drops characters when handed a lot
+at once.
 
-`make test-cluster` feeds `scripts/cluster-check.sh` into the guest the same way,
-one line at a time with a small delay, and holds stdin open afterwards so `gosh`
-does not see EOF and exit -- which is what keeps the daemons it started with a
-plain `&` alive. The bring-up is fed rather than baked into the image, and it is
-a flat script for that reason: `gosh` reads it one line at a time and every line
-must be a complete command.
+`make test-cluster` feeds the node **nothing**. The node brings itself up:
+u-root's init runs `/bin/uinit`, a Go program built from `cmd/uinit`, which
+brings up the network, sshd, the mounts and cgroups, containerd and kubelet. The
+console is still captured — with `-serial file:`, so nothing depends on the
+guest's stdin, and `-nographic` is gone — because that is where a boot that fails
+to come up says so first.
 
-That is a deliberate step back from a `/bin/uinit` in the image that u-root's
-init would run. It is the better shape -- a node should bring itself up -- and it
-was tried and reverted: `gosh` reads a *file* one line at a time too, a
-157-character line lost its redirect and its trailing `&`, and background jobs
-started without `nohup` die with the shell, so kubelet never survived. The two
-faults concealed each other. A **Go** `uinit` would have neither problem and is
-the way to do it if it is tried again.
+That is the shape this always wanted. It replaced a bring-up script piped into
+the node's shell one line at a time, and that protocol cost more time than
+anything else in this project: a line had to be short or the console corrupted
+it, no line could be a continuation, and **`A && B &` was accepted and then
+silently did nothing at all** — which is how kubelet came to never start, the only
+clue being that `/tmp/kubelet.log` did not exist. Putting the script in the image
+instead was not enough either, because `gosh` reads a *file* one line at a time
+too: a 157-character line lost its redirect and its trailing `&`. A Go program
+has none of those problems, because the kernel runs it rather than a shell
+parsing it.
 
-The harness reads the results back over **ssh** (`collect`, `diag`), and that is
-the part that mattered. The console is only used to get the script *in*, never to
-get evidence *out*: it drops characters under load, a log has to be printed at
-exactly the right moment to be caught at all, and printing one takes minutes at
-115200 baud, while a file read over ssh takes a second and does not care when it
-is read. See `docs/testing.md`.
+The **control plane VM** is still fed this way (`scripts/controlplane-boot.sh`),
+which is why `feed_guest` remains: it prints readiness markers that the harness
+reads off its console. Converting it too is the obvious next step and has not
+been done.
+
+The harness reads the node's results over **ssh** (`collect`, `diag`). The console
+is used to get a script *in* to the control plane VM, never to get evidence *out*
+of the node: it drops characters under load, a log has to be printed at exactly
+the right moment to be caught at all, and printing one takes minutes at 115200
+baud, while a file read over ssh takes a second and does not care when it is read.
+See `docs/testing.md`.
 
 The QEMU cmdline is
 `console=ttyS0,115200 panic=-1 cgroup_no_v1=all`. The last flag is not

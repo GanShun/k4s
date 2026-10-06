@@ -31,11 +31,28 @@ install itself before the node can become Ready at all.
 
 One caveat, recorded because it is real rather than because it is understood. The
 Cilium leg has been seen to fail at the end of its second boot with exit 255 and
-no message at all — under `make test-all`, and not when the same leg is driven
-directly. It is intermittent, and it has not yet been reproduced with a trace
-attached. `K4S_XTRACE=1` (see `CLAUDE.md`) is how to catch it: the harness's `ERR`
-trap does not fire for an explicit exit or a signal, so a trace of the run is the
-only instrument that will say where it goes.
+no message at all. A `K4S_XTRACE` trace found the mechanism: `guest_get` used
+`out=$(timeout 8 ssh ...); rc=$?`, and under `set -e` a failing ssh exits the
+shell on the assignment, so `rc=$?` never ran — the code written to *handle* a
+failure was defeated by the option that makes failures fatal. The `ERR` trap did
+not fire because Bash does not inherit one into shell functions without `set -E`,
+so the diagnostic was invisible at the one place it was needed. Both are fixed.
+
+The trigger underneath is a genuine ssh failure — `Connection timed out during
+banner exchange`, rc 255, about once per Cilium leg, at `run_cilium`'s first read.
+It has **not** been reproduced deliberately. Three attempts, 121 probes with zero
+failures: guest CPU saturated by a real `ctr` pull of the Cilium image (loadavg
+2.34 on 2 vCPUs), host CPU saturated, and both together. ssh latency roughly
+doubles under load — 0.14 s to 0.28 s — but never approaches the 5 s banner
+timeout, and console round-trips are unaffected throughout, so the guest kernel
+stays responsive and the added latency is in QEMU's network path.
+
+That leaves the emulated network path as the suspect and load as the wrong
+variable. The one thing those probes never exercise is Cilium's own datapath
+installation — BPF attachment, routes, interface changes — which needs a real
+cluster to reproduce. Until someone does, the handling is the retry that
+`run_cilium` already has: the failure is now reported and absorbed instead of
+killing the run, and it is counted rather than hidden.
 
 ## How a cluster test runs
 
@@ -44,35 +61,46 @@ because the split is deliberate.
 
 | | What it is | What it does |
 | --- | --- | --- |
-| `scripts/test-cluster.sh` (1035 lines, 30 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
-| `scripts/controlplane-boot.sh` (73) | the control plane VM's own script | starts etcd, kube-apiserver, kube-controller-manager, kube-scheduler |
-| `scripts/cluster-check.sh` (105) | the node's bring-up, piped into the guest's `gosh` | network, mounts, cgroups, containerd, kubelet — and nothing else |
+| `scripts/test-cluster.sh` (1017 lines, 30 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
+| `scripts/controlplane-boot.sh` (73) | the control plane VM's own script, fed to its shell | starts etcd, kube-apiserver, kube-controller-manager, kube-scheduler |
+| `cmd/uinit/main.go` (~190) | the node's bring-up, **in the image** | network, sshd, mounts, cgroups, containerd, kubelet — and nothing else |
 
-### The node's bring-up is a script fed to the guest
+### The node brings itself up
 
-The last row is not a test script in the sense the others are — it is the node's
-bring-up, and it is fed into the guest's shell over the serial console one line
-at a time, with stdin held open afterwards so `gosh` does not see EOF and exit.
-Holding it open is what keeps the shell alive, which is what keeps the daemons
-started with a plain `&` alive: no `nohup` is used, because nothing is left to
-send the HUP.
+The last row is not a test script. It is the node's own bring-up, compiled into
+the image as `/bin/uinit`, and u-root's init runs it: `libinit.RunCommands` walks
+`/inito`, `/bbin/uinit`, `/bin/uinit`, `/buildbin/uinit`, `/bin/defaultsh`,
+`/bin/sh`, running each that exists and waiting for it to exit. So `uinit` starts
+the daemons in their own sessions and returns, and init falls through to a shell
+afterwards.
 
-`gosh` is not bash, and that constraint is the reason this is a flat script and
-not anything nicer: every line must be a complete command, with no multi-line
-blocks and no backslash continuations, and it has to stay short because the
-console drops characters on long lines.
+**The node is fed nothing.** The harness boots the VM and waits; everything else
+is the node's own doing. The console is still captured, with `-serial file:`
+rather than `-nographic`, so nothing depends on the guest's stdin at all.
 
-The obvious better shape is for the node to bring itself up from a file in the
-image rather than being fed over a console. That was tried and **reverted**, and
-the reason is worth keeping: `gosh` reads a file one line at a time too, and a
-157-character line did not survive being read from a file — the redirect and the
-trailing `&` were lost — and background jobs started without `nohup` die with the
-shell, so kubelet never survived. The two faults concealed each other. A **Go**
-`uinit` would have neither problem, and is the way to do it if it is tried again.
+This replaced a bring-up script piped into the guest's shell one line at a time,
+and that protocol cost more time than anything else in this project. `gosh` is not
+bash: every line had to be a complete command, short enough that the console did
+not corrupt it, with no backslash continuations — and **`A && B &` was accepted
+and then silently did nothing at all**, which is how kubelet came to never start,
+the only clue being that `/tmp/kubelet.log` did not exist. Putting the script in
+the image instead did not help, because `gosh` reads a *file* one line at a time
+too: a 157-character line lost its redirect and its trailing `&`, and background
+jobs started without `nohup` died with the shell. The two faults concealed each
+other for a long time.
 
-There is a second thing worth knowing about the fed shape: the guest does not
-decide when it is finished. The harness holds stdin open and stops the VM itself,
-so the guest cannot power off while the harness is still applying pods.
+A Go program has none of those problems, because the kernel runs it rather than a
+shell parsing it. There is no line length, no continuation rule, no quoting, and
+no `&` to be silently dropped.
+
+The **control plane VM** is still fed this way, and `feed_guest` in the harness
+exists for it: `controlplane-boot.sh` prints readiness markers that the harness
+reads off its console. Converting that too is the obvious next step and has not
+been done.
+
+One consequence of the node not being fed is that the guest does not decide when
+it is finished. The harness stops the VM itself, so the guest cannot power off
+while the harness is still applying pods — which used to race every check.
 
 ### How the pods are deployed
 
@@ -110,7 +138,7 @@ below.
 ## What the node image needed
 
 Every one of these was discovered by a failure, and several are non-obvious
-enough to be worth listing together. They live in `scripts/cluster-check.sh` and
+enough to be worth listing together. They live in `cmd/uinit/main.go` and
 `configs/node/`.
 
 | Requirement | What breaks without it |
@@ -255,9 +283,8 @@ the `iptables` binary, Cilium's image already ships one, and the failure was
 
 ## What could be simpler
 
-Observations, not decisions. The first, second and fourth of these have since
-been done; they are left here because the reasoning is what the changes were
-made on.
+Observations, not decisions. Most of these have since been done; they are left
+here because the reasoning is what the changes were made on.
 
 **The Makefile did not know about Cilium.** The Cilium kernel was built by hand
 into `build/kernel-cni` (the recipe is in `docs/cilium.md`) and the Cilium test
@@ -273,7 +300,7 @@ the wrong phase, a lock that was not there. A single watchdog at the top that
 prints the current phase and exits would turn every one of those into a fast,
 informative failure. It is the one structural thing still worth adding.
 
-**The harness is ~900 lines across 32 functions, and only some of it is the
+**The harness is ~1000 lines across 30 functions, and only some of it is the
 test.** Roughly: ~50 lines build the control-plane binaries from pinned source,
 ~82 generate the throwaway PKI, ~150 boot and manage VMs, ~100 are Cilium, and
 the rest is applying manifests and checking markers. The VM management in
@@ -290,17 +317,17 @@ the VMs are throwaway.
 section, a stale header comment about fixed sleeps, and a `--- cni logs ---`
 section that `cat`s whole logs to the serial console, the exact thing that was
 too slow. Done: it was tidied, one markers block, no console log-catting, and
-poll loops instead of fixed sleeps. It is still fed over the console, which the
-section above explains.
+poll loops instead of fixed sleeps — and then deleted, because the node no longer
+needs a script fed to it at all.
 
-**The node's bring-up shape is dictated by gosh.** `scripts/cluster-check.sh` is
-fed to the guest one line at a time, and gosh's parsing is not bash's: every line
-must be a complete command, with no multi-line blocks and no backslash
-continuations, and lines have to stay short because the console drops characters
-on long ones. The bring-up belongs in the image instead, and that was tried and
-reverted — the section above has the two reasons.
+**The node's bring-up shape was dictated by gosh.** Done: the bring-up is
+`cmd/uinit`, a Go program in the image, so gosh's parsing rules do not apply to
+the node any more. The two faults that made the earlier file-in-the-image attempt
+fail cannot happen in a compiled program — there is no line length, no
+continuation rule, and no `&` to be silently dropped. The **control plane VM is
+still fed** and still bound by all of them.
 
-The one that cost real time, from that attempt: **gosh accepts `A && B &` and then
+For the record, the one that cost real time: **gosh accepts `A && B &` and then
 does nothing with it.** kubelet was started that way, so it silently never ran,
 wrote no log, and the node never registered — and the absence of the log was the
 clue, since a shell creates a redirect target before it execs, so a missing

@@ -68,7 +68,6 @@ SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
 CP_IMAGE=$CP/controlplane-image.cpio
 CP_GUEST=$(dirname "$0")/controlplane-boot.sh
-GUEST=$(dirname "$0")/cluster-check.sh
 CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
 NETNS_POD=$CONFIGS/netns-pod.yaml
@@ -307,6 +306,12 @@ cp_down() {
 # At 115200 baud a 78-character line takes about 7ms, so 50ms leaves plenty of
 # room. It also holds stdin open until the VM is gone, because gosh treats a
 # closed stdin as end of script.
+# feed_guest feeds a script to a guest's shell over the serial console, one line
+# at a time, and waits for the VM to exit.
+#
+# Only the control plane VM is fed now. The node used to be, and that is what
+# made this function necessary; it brings itself up from /bin/uinit instead, so
+# none of the gosh constraints apply to it any more.
 feed_guest() {
 	local pidfile=$1 line waited=0
 	while IFS= read -r line; do
@@ -499,30 +504,28 @@ splice_image() {
 boot() {
 	local n=$1
 	log "booting the node image (run $n/$BOOTS)"
-	# Hold stdin open past the script so gosh does not see EOF and exit, and feed
-	# it one line at a time: handing the whole script to the serial port at once
-	# overruns the guest's UART, and the guest stops partway through with no error.
+	# Nothing is fed to this guest. The node brings itself up: u-root's init runs
+	# /bin/uinit, a Go program built from cmd/uinit, which brings up the network,
+	# sshd, the mounts and cgroups, containerd and kubelet. The console is still
+	# captured, because that is where a boot that fails to come up says so first.
 	#
-	# The bring-up itself used to live in the image, as a /bin/uinit that u-root's
-	# init ran. That is the better shape -- a node should bring itself up -- but
-	# gosh is not bash and it cost a great deal: a 157-character line did not
-	# survive being read from a file, losing a redirect and its trailing `&`, and
-	# background jobs started without nohup die when the shell that started them
-	# goes away, so kubelet never survived. A Go uinit would have neither problem,
-	# and is the way to do this if it is tried again.
-	{
-		# Cilium's DaemonSet mounts /lib/modules unconditionally, and this image
-		# has no modules and so no such directory.
-		if [ "$CNI" = cilium ]; then
-			printf 'mkdir -p /lib/modules\n'
-		fi
-		cat "$GUEST"
-	} | feed_guest "$CP/qemu.pid" | qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
-			-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
-			-device virtio-net-pci,netdev=n0 \
-			-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
-			-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
-			-nographic -no-reboot > "$CP/boot$n.log" 2>&1 &
+	# This replaced a bring-up script piped into the guest's shell one line at a
+	# time. gosh is not bash, and that protocol cost more time than anything else
+	# in this project: a line had to be short or the console corrupted it, no
+	# line could be a continuation, and `A && B &` was accepted and then silently
+	# ignored. None of that exists now -- the kernel runs the program.
+	#
+	# -serial file: rather than -nographic. With nothing to feed, -nographic
+	# would be reading a closed stdin, and QEMU's stdio chardev can decide to
+	# quit on EOF. This way the console goes to the log and nothing depends on
+	# stdin at all.
+	qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
+		-device virtio-net-pci,netdev=n0 \
+		-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
+		-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
+		-display none -monitor none -serial "file:$CP/boot$n.log" \
+		-no-reboot 2>> "$CP/boot$n.log" &
 	echo $! > "$CP/qemu.pid"
 }
 
