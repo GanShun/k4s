@@ -181,6 +181,41 @@ this work moved, and it is also why the conflist was load-bearing even then: the
 CRI will not report `NetworkReady` with an empty `/etc/cni/net.d`, because it
 synthesises a loopback network of its own and requires two.
 
+### Control plane bring-up: kubeadm, deferred (2026-10-06)
+
+The test cluster's control plane is hand-rolled: four binaries built from pinned
+source, baked into a 296 MiB initramfs, with their flags in `cmd/uinit` and their
+PKI written by `scripts/test-cluster.sh`. The alternative is **kubeadm**, and the
+intended direction is to move to it. A familiar `kubeadm`/`kubelet` interface is
+worth more in production than anything the hand-rolled version buys.
+
+It is deferred rather than rejected, and the reason is worth recording because it
+is a *test-time* argument that will not survive contact with production. What
+kubeadm costs here:
+
+- the control plane becomes static pods, so kube-apiserver, kube-controller-manager,
+  kube-scheduler, etcd and pause arrive as **images pulled from a registry on every
+  run** (~400–500 MiB). Today the 282 MiB of binaries are compiled once from pinned
+  source and baked in, and the control plane needs no registry at all.
+- the control plane VM is `-m 1024`, and a RAM-only image store is a tmpfs, which
+  defaults to *half* of RAM. It would need roughly 4 GiB.
+
+Neither matters on a large production machine, and neither is a reason to keep the
+hand-rolled control plane forever. It is a reason not to change it while the tests
+are the only consumer.
+
+The kernel is **not** an obstacle, which is worth knowing before someone looks:
+kubeadm's preflight wants `overlay`, `br_netfilter` and iptables, and this image
+has `CONFIG_OVERLAY_FS=y`, `CONFIG_BRIDGE_NETFILTER=y` and `CONFIG_NF_TABLES=y`.
+kubeadm is also already in the pinned `kubernetes/` checkout, so building it adds
+no new dependency.
+
+A middle path, if only the PKI is wanted: `kubeadm init phase certs all` and
+`kubeadm init phase kubeconfig all` at build time replace `gen_pki`'s 82 lines of
+openssl with two subcommands, and cost nothing at runtime. It is a like-for-like
+swap rather than an obvious win, since `gen_pki` already works and is cached
+across runs.
+
 ### M2 — Ephemeral hygiene and the kill switch
 
 - tmpfs and eviction policy, log shipping, watchdog/EPO integration, and the
