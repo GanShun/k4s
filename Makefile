@@ -75,7 +75,13 @@ check-pahole:
 # tinyconfig is the smallest base; the fragments add what the image needs.
 # olddefconfig needs pahole too, not just the build: DEBUG_INFO_BTF's value is
 # resolved while the config is being settled.
-$(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) check-pahole | $(BUILD)
+#
+# check-pahole is an **order-only** prerequisite. It is phony, so as an ordinary
+# prerequisite it made .config permanently out of date and re-ran tinyconfig,
+# olddefconfig and the bzImage relink on every single make -- including every
+# `make test`. Order-only still builds it, and still before the recipe, but it no
+# longer counts towards whether .config is up to date.
+$(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) | $(BUILD) check-pahole
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) tinyconfig
 	cat $(FRAGMENT) $(CNI_FRAGMENT) >> $(BUILD)/.config
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) olddefconfig
