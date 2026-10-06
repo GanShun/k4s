@@ -62,17 +62,22 @@ because the split is deliberate.
 | | What it is | What it does |
 | --- | --- | --- |
 | `scripts/test-cluster.sh` (1017 lines, 30 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
-| `scripts/controlplane-boot.sh` (73) | the control plane VM's own script, fed to its shell | starts etcd, kube-apiserver, kube-controller-manager, kube-scheduler |
-| `cmd/uinit/main.go` (~190) | the node's bring-up, **in the image** | network, sshd, mounts, cgroups, containerd, kubelet — and nothing else |
+| `cmd/uinit/main.go` (~380) | **both bring-ups, in the image** | the node's: network, sshd, mounts, cgroups, containerd, kubelet. The control plane's: network, etcd, apiserver, controller-manager, scheduler. Chosen by `/etc/k4s/role` |
 
-### The node brings itself up
+### The VMs bring themselves up
 
-The last row is not a test script. It is the node's own bring-up, compiled into
-the image as `/bin/uinit`, and u-root's init runs it: `libinit.RunCommands` walks
-`/inito`, `/bbin/uinit`, `/bin/uinit`, `/buildbin/uinit`, `/bin/defaultsh`,
-`/bin/sh`, running each that exists and waiting for it to exit. So `uinit` starts
-the daemons in their own sessions and returns, and init falls through to a shell
-afterwards.
+The last row is not a test script. It is both guests' bring-up, compiled into the
+image as a **bb applet** at `/bbin/uinit`, and u-root's init runs it:
+`libinit.RunCommands` walks `/inito`, `/bbin/uinit`, `/bin/uinit`,
+`/buildbin/uinit`, `/bin/defaultsh`, `/bin/sh`, running each that exists and
+waiting for it to exit. So `uinit` starts the daemons in their own sessions and
+returns, and init falls through to a shell afterwards.
+
+Which bring-up it runs is read from `/etc/k4s/role`, because the two roles have to
+be one package: u-root builds bb with `GO111MODULE=off` in a synthetic GOPATH and
+links only the packages named on its command line, so an applet cannot import a
+sibling package. They were two commands sharing one until that build refused them.
+The node image carries `node` and the control plane image carries `control-plane`.
 
 **The node is fed nothing.** The harness boots the VM and waits; everything else
 is the node's own doing. The console is still captured, with `-serial file:`
@@ -93,10 +98,11 @@ A Go program has none of those problems, because the kernel runs it rather than 
 shell parsing it. There is no line length, no continuation rule, no quoting, and
 no `&` to be silently dropped.
 
-The **control plane VM** is still fed this way, and `feed_guest` in the harness
-exists for it: `controlplane-boot.sh` prints readiness markers that the harness
-reads off its console. Converting that too is the obvious next step and has not
-been done.
+**Neither VM is fed.** The control plane used to be, and `feed_guest` existed only
+for it: it printed readiness markers for the harness to grep out of its console.
+It now has its own role in `cmd/uinit`, which polls etcd and the apiserver before
+saying it is done, and the harness's gate is the apiserver answering on the
+forwarded port. The console is diagnostic-only everywhere.
 
 One consequence of the node not being fed is that the guest does not decide when
 it is finished. The harness stops the VM itself, so the guest cannot power off
@@ -220,6 +226,16 @@ used `ssh -q` with the exit status swallowed, so a dropped connection produced
 exactly the same empty output as an empty file, and a stale file left by an
 earlier run was read as proof that ssh was working. It is `LogLevel=ERROR` now.
 
+**A second copy of a daemon can destroy the first, and then fail.** `make test`'s
+capability check used to bring the image up itself. Once `uinit` did that first,
+the check was starting a *second* containerd — and containerd removes its socket
+path before it listens, so the second instance deleted the running one's socket
+and then failed to bind. `ctr version` could not connect at all, and the check
+reported `ctr: fail` for a containerd that had been healthy the whole time. The
+check now assumes nothing has started it and checks the node that brought itself
+up, which is the better test anyway: it exercises the same bring-up the cluster
+test uses, rather than a second one that existed only there.
+
 ## The conflist race, precisely
 
 Worth writing down because the mechanism is subtle and the wrong explanation is
@@ -304,8 +320,8 @@ informative failure. It is the one structural thing still worth adding.
 test.** Roughly: ~50 lines build the control-plane binaries from pinned source,
 ~82 generate the throwaway PKI, ~150 boot and manage VMs, ~100 are Cilium, and
 the rest is applying manifests and checking markers. The VM management in
-particular is generic (`cp_up`, `boot`, `feed_guest`, `stop_guest`,
-`kill_qemu_for`, `splice_image`, the two `build_*_image` functions), and it is
+particular is generic (`cp_up`, `boot`, `stop_guest`, `kill_qemu_for`,
+`splice_image`, the two `build_*_image` functions), and it is
 the obvious thing to factor out — or to replace, if the harness is rewritten.
 
 **The control plane is rebuilt and re-PKI'd on every run.** That is ~185 lines
@@ -320,12 +336,11 @@ too slow. Done: it was tidied, one markers block, no console log-catting, and
 poll loops instead of fixed sleeps — and then deleted, because the node no longer
 needs a script fed to it at all.
 
-**The node's bring-up shape was dictated by gosh.** Done: the bring-up is
-`cmd/uinit`, a Go program in the image, so gosh's parsing rules do not apply to
-the node any more. The two faults that made the earlier file-in-the-image attempt
-fail cannot happen in a compiled program — there is no line length, no
-continuation rule, and no `&` to be silently dropped. The **control plane VM is
-still fed** and still bound by all of them.
+**The bring-up shape was dictated by gosh.** Done: both bring-ups are `cmd/uinit`,
+a Go program in the image, so gosh's parsing rules do not apply to either guest any
+more. The two faults that made the earlier file-in-the-image attempt fail cannot
+happen in a compiled program — there is no line length, no continuation rule, and
+no `&` to be silently dropped.
 
 For the record, the one that cost real time: **gosh accepts `A && B &` and then
 does nothing with it.** kubelet was started that way, so it silently never ran,

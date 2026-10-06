@@ -53,8 +53,9 @@ UEFI PXE
 ```
 
 For testing, the cluster it joins is a second QEMU VM of the same shape: an
-initramfs with etcd, kube-apiserver, kube-controller-manager and kube-scheduler
-(see `scripts/controlplane-boot.sh`). It exists so that what the node joins is a
+initramfs with etcd, kube-apiserver, kube-controller-manager and kube-scheduler,
+brought up by the control-plane role of `cmd/uinit`. It exists so that what the
+node joins is a
 real control plane — with pod CIDR allocation, the DaemonSet and Deployment
 controllers, a scheduler and service account tokens — rather than the etcd and
 apiserver only pair the test started with on the host.

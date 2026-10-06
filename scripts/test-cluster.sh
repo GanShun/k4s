@@ -67,7 +67,6 @@ APISERVER="https://127.0.0.1:$PORT"
 SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
 CP_IMAGE=$CP/controlplane-image.cpio
-CP_GUEST=$(dirname "$0")/controlplane-boot.sh
 CONFIGS=$(dirname "$0")/../configs/node
 POD=$CONFIGS/smoke-pod.yaml
 NETNS_POD=$CONFIGS/netns-pod.yaml
@@ -295,51 +294,6 @@ cp_down() {
 	sleep 1
 }
 
-# Feed a guest its script, one line at a time. Still used for the control plane
-# VM, whose image is built by this script and whose script is therefore spliced
-# in rather than being a file in the image the way the node's uinit is.
-#
-# One line at a time, and slowly: handing the whole script to the serial port at
-# once overruns the guest's UART and drops characters, which corrupts the script
-# and stops the guest partway through -- the console simply ends mid-file with no
-# error, and everything the guest was supposed to print afterwards is missing.
-# At 115200 baud a 78-character line takes about 7ms, so 50ms leaves plenty of
-# room. It also holds stdin open until the VM is gone, because gosh treats a
-# closed stdin as end of script.
-# feed_guest feeds a script to a guest's shell over the serial console, one line
-# at a time, and waits for the VM to exit.
-#
-# Only the control plane VM is fed now. The node used to be, and that is what
-# made this function necessary; it brings itself up from /bin/uinit instead, so
-# none of the gosh constraints apply to it any more.
-feed_guest() {
-	local pidfile=$1 line waited=0
-	while IFS= read -r line; do
-		printf '%s\n' "$line"
-		sleep 0.05
-	done
-	# Wait for the pidfile to be written -- the caller creates it only after this
-	# pipeline has started -- and then wait for the VM to go away.
-	#
-	# A missing pidfile must NOT mean "keep waiting". cp_down removes
-	# controlplane.pid when it stops the control plane VM, so once that has
-	# happened the file is gone for good, and a condition of the form
-	# `[ ! -s "$pidfile" ] || kill -0 ...` stayed true and spun here for its whole
-	# bound. A trace caught it at waited=189 against a pidfile that no longer
-	# existed, which is the sort of thing that shows up as a run that is fine and
-	# then mysteriously is not.
-	while [ ! -s "$pidfile" ] && [ "$waited" -lt 30 ]; do
-		sleep 1
-		waited=$((waited + 1))
-	done
-	waited=0
-	while kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; do
-		sleep 1
-		waited=$((waited + 1))
-		[ "$waited" -lt 600 ] || break
-	done
-}
-
 wait_apiserver() {
 	local i
 	# Generous, because this polls across a VM boot: QEMU, then etcd, then the
@@ -355,7 +309,13 @@ wait_apiserver() {
 
 build_controlplane_image() {
 	log "building the control plane image"
+	# This image carries the same uinit applet as the node's, and tells it which
+	# role it is by this file. The two roles are one package because u-root builds
+	# bb with GO111MODULE=off and links only the packages named on its command
+	# line, so an applet cannot import a sibling package.
+	printf 'control-plane\n' > "$CP/role"
 	./u-root/u-root -o "$CP_IMAGE" \
+		-files "$CP/role":etc/k4s/role \
 		-files "$CP/etcd":bin/etcd \
 		-files "$CP/kube-apiserver":bin/kube-apiserver \
 		-files "$CP/kube-controller-manager":bin/kube-controller-manager \
@@ -368,8 +328,9 @@ build_controlplane_image() {
 		-files "$PKI/admin.kubeconfig":etc/kubernetes/admin.kubeconfig \
 		-files "$CONFIGS/passwd":etc/passwd \
 		-files "$CONFIGS/group":etc/group \
-		-files "$CONFIGS/hosts":etc/hosts \
-		u-root/cmds/core/* >/dev/null
+	-files "$CONFIGS/hosts":etc/hosts \
+	u-root/cmds/core/* \
+	./cmd/uinit >/dev/null
 }
 
 cp_up() {
@@ -395,44 +356,34 @@ cp_up() {
 		exit 1
 	fi
 	log "booting the control plane VM"
-	# Hold stdin open past the script so gosh does not see EOF and exit. The
-	# port forward is how both the host and the node reach the apiserver: the
-	# host at 127.0.0.1:6443, and the node at 10.0.2.2:6443, which is the host
-	# from inside the node's user-mode network.
-	cat "$CP_GUEST" | feed_guest "$CP/controlplane.pid" | \
-		qemu-system-x86_64 -M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
-			-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:$PORT \
-			-device virtio-net-pci,netdev=n0 \
-			-kernel "$KERNEL" -initrd "$CP_IMAGE" \
-			-append "console=ttyS0,115200 panic=-1" \
-			-nographic -no-reboot > "$CP/controlplane.log" 2>&1 &
+	# Nothing is fed to this guest either. It brings itself up from /bbin/uinit,
+	# which is the control-plane role of cmd/uinit, and that polls etcd and the
+	# apiserver before it says it is done. The port forward is how both the host
+	# and the node reach the apiserver: the host at 127.0.0.1:6443, and the node
+	# at 10.0.2.2:6443, which is the host from inside the node's user-mode
+	# network.
+	qemu-system-x86_64 -M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:$PORT \
+		-device virtio-net-pci,netdev=n0 \
+		-kernel "$KERNEL" -initrd "$CP_IMAGE" \
+		-append "console=ttyS0,115200 panic=-1" \
+		-display none -monitor none -serial "file:$CP/controlplane.log" \
+		-no-reboot 2>> "$CP/controlplane.log" &
 	echo $! > "$CP/controlplane.pid"
 	if ! kill -0 "$(cat "$CP/controlplane.pid")" 2>/dev/null; then
 		echo "the control plane VM exited at startup" >&2
 		tail -20 "$CP/controlplane.log" >&2
 		exit 1
 	fi
-	# The guest prints this once etcd, the apiserver, the controller-manager and
-	# the scheduler are all running. Requiring it is what distinguishes this
-	# VM's apiserver from anything else that happens to answer on the port.
-	local i
-	for i in $(seq 1 150); do
-		grep -qa 'K4S_CP_READY' "$CP/controlplane.log" && break
-		sleep 1
-	done
-	if ! grep -qa 'K4S_CP_READY' "$CP/controlplane.log"; then
-		echo "the control plane VM never reported ready" >&2
-		tail -40 "$CP/controlplane.log" >&2
-		exit 1
-	fi
-	# The guest checks each service rather than assuming, because a service that
-	# refused to start leaves everything else looking normal.
-	if ! grep -qa 'K4S_CP: apiserver: ok' "$CP/controlplane.log"; then
-		echo "a service in the control plane VM failed to start" >&2
-		grep -a 'K4S_CP: ' "$CP/controlplane.log" >&2
-		grep -a -A5 'apiserver log tail' "$CP/controlplane.log" >&2
-		exit 1
-	fi
+	# The gate is the apiserver answering on the forwarded port, and nothing
+	# more. The guest's uinit has already asked etcd and the apiserver whether
+	# they are up, and the guard above established that nothing else was serving
+	# this port, so a health check here is this VM's apiserver.
+	#
+	# This replaced three greps of the guest's console for markers it printed
+	# itself. The marker for "ready" was only ever a proxy for this check, and the
+	# marker for "apiserver: ok" was a grep of a log for the word "Error", which
+	# cannot tell a healthy service from one that failed in a way it did not log.
 	if ! wait_apiserver; then
 		echo "the apiserver never became healthy in the control plane VM" >&2
 		tail -40 "$CP/controlplane.log" >&2

@@ -148,8 +148,7 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |
-| `scripts/controlplane-boot.sh` | Guest half of that test: the control plane VM's own boot |
-| `cmd/uinit/` | The node's own bring-up, installed as `/bin/uinit` and run by u-root's init |
+| `cmd/uinit/` | Both bring-ups, in the image as a bb applet: the node's and the control plane's, chosen by `/etc/k4s/role` |
 | `scripts/clone-linux.sh` | Clones the pinned kernel checkout for `make linux` |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/testing.md` | What the two tests are, how a cluster test runs, and what the
@@ -195,9 +194,9 @@ the `bb` binary itself and loses the applet name:
 - `runc` — `exec.Command(exePath, "init")` for the container init
 - `kubelet` — one large binary, not an applet
 
-A fourth file is added the same way for a different reason: `uinit` is not a
-u-root applet at all, but the node's own bring-up program, which u-root's init
-runs from `/bin/uinit`.
+`uinit` is deliberately **not** in that list. It is a bb applet, because it does
+not re-exec itself and it is a `go.work` member, so it costs one copy of the Go
+runtime instead of two.
 
 All three are built `CGO_ENABLED=0` and added with `-files`. `runc` comes from
 the fork (see below); `kubelet` is built with `-mod=vendor` and an ldflags
@@ -251,12 +250,13 @@ stdin. u-root's `gosh` treats a non-tty stdin as a script, so **every line of
 and lines must stay short, because the console drops characters when handed a lot
 at once.
 
-`make test-cluster` feeds the node **nothing**. The node brings itself up:
-u-root's init runs `/bin/uinit`, a Go program built from `cmd/uinit`, which
-brings up the network, sshd, the mounts and cgroups, containerd and kubelet. The
-console is still captured — with `-serial file:`, so nothing depends on the
-guest's stdin, and `-nographic` is gone — because that is where a boot that fails
-to come up says so first.
+`make test-cluster` feeds its guests **nothing**. Both VMs bring themselves up:
+u-root's init runs `/bbin/uinit`, the bb applet built from `cmd/uinit`, which reads
+`/etc/k4s/role` and runs either the node's bring-up (network, sshd, mounts,
+cgroups, containerd, kubelet) or the control plane's (network, etcd, apiserver,
+controller-manager, scheduler). The console is still captured — with
+`-serial file:`, so nothing depends on the guest's stdin, and `-nographic` is gone
+— because that is where a boot that fails to come up says so first.
 
 That is the shape this always wanted. It replaced a bring-up script piped into
 the node's shell one line at a time, and that protocol cost more time than
@@ -269,10 +269,11 @@ too: a 157-character line lost its redirect and its trailing `&`. A Go program
 has none of those problems, because the kernel runs it rather than a shell
 parsing it.
 
-The **control plane VM** is still fed this way (`scripts/controlplane-boot.sh`),
-which is why `feed_guest` remains: it prints readiness markers that the harness
-reads off its console. Converting it too is the obvious next step and has not
-been done.
+**Neither VM is fed.** The control plane used to be, and `feed_guest` existed for
+it; it now has its own role in `cmd/uinit`, so the console is diagnostic-only
+everywhere. Its readiness is the apiserver answering on the forwarded port, which
+is what `wait_apiserver` polls, rather than markers printed for the harness to
+grep out of the console.
 
 The harness reads the node's results over **ssh** (`collect`, `diag`). The console
 is used to get a script *in* to the control plane VM, never to get evidence *out*
