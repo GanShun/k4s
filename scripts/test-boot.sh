@@ -10,7 +10,13 @@
 #
 # Env: K4S_BOOT_TIMEOUT  seconds to wait for the guest (default 180)
 
-set -euo pipefail
+set -Eeuo pipefail
+
+# Same reason as the cluster harness: under `set -e` a failing command aborts with
+# its own status and no explanation, and an ERR trap is not inherited by shell
+# functions without -E. This script is short, but the two behave alike so that
+# neither is the one you have to remember.
+trap 'echo "test-boot.sh: failed at line $LINENO (exit $?)" >&2' ERR
 
 KERNEL=${1:?usage: test-boot.sh <kernel> <initramfs> [guest-script]}
 IMAGE=${2:?usage: test-boot.sh <kernel> <initramfs> [guest-script]}

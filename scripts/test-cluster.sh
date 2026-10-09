@@ -76,15 +76,11 @@ LOGPOD=$CONFIGS/log-pod.yaml
 FLANNEL_DS=$CONFIGS/flannel-ds.yaml
 DEPLOY=$CONFIGS/deploy-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
-BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
 # kernel built with configs/k4s-cni.config and a great deal more memory, so the
 # node VM is given more room there.
 CNI=${K4S_CNI:-flannel}
-# 1 reuses a control plane VM that is already up, and leaves it up, so that
-# repeated attempts at the node side cost a node boot instead of two VM boots
-# and a control plane image build.
 NODE_MEM=${K4S_NODE_MEM:-1536}
 CILIUM_VERSION=${K4S_CILIUM_VERSION:-1.20.2}
 HELM=${HELM:-helm}
@@ -588,6 +584,20 @@ wait_ssh() {
 # the serial console cannot be trusted with bulk output, a log takes minutes to
 # print at 115200 baud, and a file that is read does not have to be printed at
 # the right moment to be caught. Quiet -- diag() prints the summary.
+# The guest's own daemon logs, kept for a second look. collect() and diag() both
+# want the same set, so it is written once here rather than twice.
+grab_guest_logs() {
+	local d=$1 m
+	for m in kubelet.log containerd.log sshd.log; do
+		guest_get "cat /tmp/$m" > "$d/$m" 2>/dev/null || true
+	done
+	guest_get 'cat /var/log/pods/*cilium-*/cilium-agent/*.log' > "$d/cilium-agent.log" 2>/dev/null || true
+	# flanneld runs out of the node's own /bbin in a DaemonSet and writes here.
+	# Nothing asserts on it; it is collected because it is the first thing worth
+	# reading when the pod network misbehaves.
+	guest_get 'cat /var/log/k4s-flannel/flannel.log' > "$d/flannel.log" 2>/dev/null || true
+}
+
 collect() {
 	local d=$CP/diag m
 	mkdir -p "$d" "$CP/markers"
@@ -610,10 +620,7 @@ collect() {
 	if [[ -n "$ngip" ]]; then
 		guest_get "wget -O /tmp/k4s-nginx.html http://$ngip/ 2>&1; echo '--- page ---'; cat /tmp/k4s-nginx.html 2>&1" > "$CP/markers/nginx"
 	fi
-	for m in kubelet.log containerd.log sshd.log; do
-		guest_get "cat /tmp/$m" > "$d/$m" 2>/dev/null || true
-	done
-	guest_get 'cat /var/log/pods/*cilium-*/cilium-agent/*.log' > "$d/cilium-agent.log" 2>/dev/null || true
+	grab_guest_logs "$d"
 	guest_get 'ls /etc/cni/net.d; ls /opt/cni/bin' > "$d/cni-files" 2>/dev/null || true
 }
 
@@ -641,10 +648,7 @@ diag() {
 	echo "  --- the agent, errors ---" >&2
 	guest_get 'grep -E "level=(error|fatal)" /var/log/pods/*cilium-*/cilium-agent/*.log | tail -n 12' | sed 's/^/  /' >&2
 	# Keep the full logs for a second look, rather than printing them.
-	for m in kubelet.log containerd.log sshd.log; do
-		guest_get "cat /tmp/$m" > "$d/$m" 2>/dev/null || true
-	done
-	guest_get 'cat /var/log/pods/*cilium-*/cilium-agent/*.log' > "$d/cilium-agent.log" 2>/dev/null || true
+	grab_guest_logs "$d"
 	echo "  (full logs kept in $d)" >&2
 }
 
@@ -977,10 +981,19 @@ check_marker() {
 		head -c 400 "$m/nginx" 2>/dev/null | sed 's/^/  /' >&2
 		return 1
 	fi
+	# The log pod's stdout only lands in a file if the node's log path works, so
+	# this asserts the plumbing rather than the pod. Without it the pod was
+	# applied, waited on and collected, and its evidence read by nothing.
+	if ! grep -q 'K4S_LOG_OK' "$m/log" 2>/dev/null; then
+		echo "log pod: FAILED (its stdout did not reach /var/log/pods)" >&2
+		sed 's/^/  /' "$m/log" >&2
+		return 1
+	fi
 	echo "pod: ok (container wrote its marker)"
 	echo "seccomp: ok (container runs under a filter)"
 	echo "netns pod: ok (container has an address on eth0 from the CNI)"
 	echo "workloads: ok (both controller-created pods wrote their markers)"
+	echo "log pod: ok (the pod's stdout reached /var/log/pods)"
 	echo "nginx: ok (the node fetched stock nginx's page over the pod network)"
 	return 0
 }
