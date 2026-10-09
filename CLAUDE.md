@@ -32,9 +32,11 @@ make clean     # remove build products (keeps the kernel checkout)
 ```
 
 `make kernel` adds both `configs/k4s-tiny.config` and `configs/k4s-cni.config`, so
-one kernel can run either CNI. The second fragment needs **pahole** (the dwarves
-package) at configure and build time for `CONFIG_DEBUG_INFO_BTF`; if it is not on
-`PATH`, point at it with `PAHOLE=/path/to/pahole make kernel`.
+one kernel can run either CNI. Both fragments need **pahole** at configure and
+build time for `CONFIG_DEBUG_INFO_BTF`; if it is not on `PATH`, point at it with
+`PAHOLE=/path/to/pahole make kernel`. On Debian and Ubuntu the package is
+`pahole` — `dwarves` is only a metapackage that pulls it in — and
+`apt-get download pahole` plus `dpkg-deb -x` gets it without root.
 
 `make test` prints three verdict lines — `boot: ok`, `capabilities: ok`,
 `container: ok` — and a `guest log:` path. `K4S_BOOT_TIMEOUT` (seconds, default
@@ -54,8 +56,9 @@ also why it is quick — around 75 seconds for two boots with flannel, and aroun
 210 with Cilium, whose agent has to install itself first.
 
 `make test-cluster-cni` needs **helm** to render Cilium's chart (`HELM=...` to
-point at one that is not on `PATH`); nothing else about the run differs. It also
-sets `K4S_NODE_MEM=6144`, which it must: see the knobs table below.
+point at one that is not on `PATH`) and **python3**, which `build_cilium` uses to
+strip the chart's `postStart` hook. It also sets `K4S_NODE_MEM=6144`, which it
+must: see the knobs table below.
 
 The control plane is a VM rather than host processes because a node should join
 something shaped like a real cluster: the controller-manager assigns pod CIDRs,
@@ -182,7 +185,8 @@ die on "destination path already exists". To move a component, edit its
 | flannel | `0567dde14a09315931e55c3cb77d43f53e0e1db3` (`purego`) |
 | kubernetes | `1c2e10a409eb1b03f2f28f401ce935312e20d9fb` (v1.35.8) |
 | cni-plugins | `257ef09a103e8b8fe91a0fefe8680c01f84b520b` (loopback only) |
-| runc | **not pinned** — the local `runc/` checkout is built as it stands, and `RUNC_REF` = `7215222c` only creates it when it is missing. A fork with a Go namespace path and a Go seccomp compiler |
+| flannel-cni-plugin | `b380f201008e9bed159703846cf10d3c50b4f9ce` (v1.9.1-flannel3) |
+| runc | **not pinned** — the local `runc/` checkout is built as it stands, and `RUNC_REF` = `d8fe9e94fe4b6bdced1cf1d2f3ea325a896322ea` only creates it when it is missing. A fork with a Go namespace path and a Go seccomp compiler |
 
 **2. Tidy.** `go mod tidy` in each module, then a u-root build.
 
