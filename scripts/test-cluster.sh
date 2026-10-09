@@ -325,7 +325,7 @@ build_controlplane_image() {
 		-files "$PKI/admin.kubeconfig":etc/kubernetes/admin.kubeconfig \
 		-files "$CONFIGS/passwd":etc/passwd \
 		-files "$CONFIGS/group":etc/group \
-	-files "$CONFIGS/hosts":etc/hosts \
+		-files "$CONFIGS/hosts":etc/hosts \
 	u-root/cmds/core/* \
 	./cmd/uinit >/dev/null
 }
@@ -582,8 +582,25 @@ wait_ssh() {
 # Pull everything the checks and the diagnostics need out of the guest while it
 # is still up, and keep it on the host. This is the reason sshd is in the image:
 # the serial console cannot be trusted with bulk output, a log takes minutes to
-# print at 115200 baud, and a file that is read does not have to be printed at
-# the right moment to be caught. Quiet -- diag() prints the summary.
+# Wait for a file-backed marker to appear in the guest, then read it.
+#
+# A pod that reports Running has not necessarily run its first instruction yet,
+# and /var/log is a tmpfs -- after a reboot the marker is gone and has to be
+# written again. Nothing here waits on the pod itself, so without this the read
+# races the container. It gives up quietly: whether an absent marker is a failure
+# is the verdict of the check that reads the file, not this one's.
+wait_marker() {
+	local guest_path=$1 out=$2 i
+	for i in $(seq 1 15); do
+		guest_get "cat $guest_path 2>/dev/null" > "$out"
+		if [ -s "$out" ]; then
+			return 0
+		fi
+		sleep 2
+	done
+	return 0
+}
+
 # The guest's own daemon logs, kept for a second look. collect() and diag() both
 # want the same set, so it is written once here rather than twice.
 grab_guest_logs() {
@@ -598,13 +615,21 @@ grab_guest_logs() {
 	guest_get 'cat /var/log/k4s-flannel/flannel.log' > "$d/flannel.log" 2>/dev/null || true
 }
 
+# Pull everything the checks and the diagnostics need, while the guest is still
+# up -- and before stop_guest, because none of it survives the VM. Quiet: diag()
+# prints the summary when a check fails. The console is not an evidence path -- it
+# drops characters under load, and a log has to be printed at exactly the right
+# moment to be caught at all; a file that is read does not.
 collect() {
 	local d=$CP/diag m
 	mkdir -p "$d" "$CP/markers"
+	# Cleared, not merely created: a marker left by an earlier run would otherwise
+	# let a check pass on evidence this run did not produce.
+	rm -f "$CP/markers"/*
 	for m in smoke netns ds deploy; do
-		guest_get "cat /var/log/k4s-$m/result 2>/dev/null" > "$CP/markers/$m"
+		wait_marker "/var/log/k4s-$m/result" "$CP/markers/$m"
 	done
-	guest_get 'cat /var/log/pods/*k4s-log*/log/*.log 2>/dev/null' > "$CP/markers/log"
+	wait_marker '/var/log/pods/*k4s-log*/log/*.log' "$CP/markers/log"
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
 	# over the pod network instead, which is also the assertion that the pod
@@ -615,10 +640,19 @@ collect() {
 	# is a bare devtmpfs with no udev, so /dev/stdout does not exist and the
 	# write fails silently. wget's stderr is kept in the marker on purpose, so a
 	# failure here says why instead of leaving an empty file.
-	local ngip
+	local ngip i
 	ngip=$(K get pod k4s-nginx -o jsonpath='{.status.podIP}' 2>/dev/null || true)
 	if [[ -n "$ngip" ]]; then
-		guest_get "wget -O /tmp/k4s-nginx.html http://$ngip/ 2>&1; echo '--- page ---'; cat /tmp/k4s-nginx.html 2>&1" > "$CP/markers/nginx"
+		# Retried for the same reason as wait_marker: after a reboot the page has
+		# to be served again, and an empty marker should mean "it never served"
+		# rather than "we asked too early".
+		for i in $(seq 1 15); do
+			guest_get "wget -O /tmp/k4s-nginx.html http://$ngip/ 2>&1; echo '--- page ---'; cat /tmp/k4s-nginx.html 2>&1" > "$CP/markers/nginx"
+			if grep -qi 'Welcome to nginx' "$CP/markers/nginx"; then
+				break
+			fi
+			sleep 2
+		done
 	fi
 	grab_guest_logs "$d"
 	guest_get 'ls /etc/cni/net.d; ls /opt/cni/bin' > "$d/cni-files" 2>/dev/null || true
