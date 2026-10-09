@@ -32,11 +32,11 @@ make clean     # remove build products (keeps the kernel checkout)
 ```
 
 `make kernel` adds both `configs/k4s-tiny.config` and `configs/k4s-cni.config`, so
-one kernel can run either CNI. Both fragments need **pahole** at configure and
-build time for `CONFIG_DEBUG_INFO_BTF`; if it is not on `PATH`, point at it with
-`PAHOLE=/path/to/pahole make kernel`. On Debian and Ubuntu the package is
-`pahole` — `dwarves` is only a metapackage that pulls it in — and
-`apt-get download pahole` plus `dpkg-deb -x` gets it without root.
+one kernel can run either CNI. The second fragment — and only it, since it is what
+sets `CONFIG_DEBUG_INFO_BTF` — needs **pahole** at configure and build time; if it
+is not on `PATH`, point at it with `PAHOLE=/path/to/pahole make kernel`. On Debian
+and Ubuntu the package is `pahole` — `dwarves` is only a metapackage that pulls it
+in — and `apt-get download pahole` plus `dpkg-deb -x` gets it without root.
 
 `make test` prints three verdict lines — `boot: ok`, `capabilities: ok`,
 `container: ok` — and a `guest log:` path. `K4S_BOOT_TIMEOUT` (seconds, default
@@ -46,8 +46,8 @@ build time for `CONFIG_DEBUG_INFO_BTF`; if it is not on `PATH`, point at it with
 generates throwaway PKI, boots a **control plane VM** (etcd, apiserver,
 controller-manager, scheduler) and then the node twice (join, then
 reboot-and-rejoin). It prints `node: ok`, `flannel: ok` or `cilium: ok`,
-`pod: ok`, `seccomp: ok`, `netns pod: ok`, `nginx: ok`, `daemonset: ok`,
-`deployment: ok`, `workloads: ok`, `cluster: ok`.
+`pod: ok`, `seccomp: ok`, `netns pod: ok`, `log pod: ok`, `nginx: ok`,
+`daemonset: ok`, `deployment: ok`, `workloads: ok`, `cluster: ok`.
 `K4S_BOOTS` (default 2) sets the number of boots. Both VMs are killed on exit.
 
 Every run is self-contained: it stops any control plane VM left by an earlier run
@@ -209,7 +209,8 @@ version stamp (`k8s.io/component-base/version.gitVersion=v1.35.8`).
 
 **4. Assemble.** `./u-root/u-root` with `u-root/cmds/core/*`,
 `./containerd/cmd/containerd`, `./containerd/cmd/ctr`, `./flannel`,
-`./coredns`, `./etcd/etcdctl`, plus the four `-files`.
+`./coredns`, `./etcd/etcdctl`, plus the `-files` inputs (seventeen of them: the
+node config, the CA bundle, uinit's role and the bundled CNI plugins).
 
 ### go.work is committed and load-bearing
 

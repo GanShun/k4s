@@ -1,8 +1,9 @@
 # The M1 smoke pod.
 #
-# hostNetwork, deliberately: the node has no CNI, and a pod that asks for one
-# would block in the sandbox network step. It also keeps this test about the
-# kubelet -> containerd -> runc path rather than about CNI, which is undecided.
+# hostNetwork, deliberately: it keeps this test about the kubelet -> containerd
+# -> runc path rather than about CNI. That was originally because the CNI was
+# undecided; it is now simply a separation of concerns -- netns-pod.yaml is the
+# pod that exercises the CNI.
 #
 # nodeName pins it to the node instead of going through the scheduler. The
 # control plane VM has a scheduler now, so this is a leftover from when it did

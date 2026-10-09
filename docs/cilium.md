@@ -1,9 +1,11 @@
 # Cilium as the node CNI: evaluation
 
-**Status: explored, not implemented (2026-10-05).** Checked against Cilium
-v1.20.2 (the latest release at the time), our kernel 7.2.0 and the current
-initramfs. Nothing here has been built or run; the numbers are measured, the
-conclusions are not.
+**Status: implemented and passing (evaluated 2026-10-05, built 2026-10-06).**
+Checked against Cilium v1.20.2, our kernel 7.2.0 and the initramfs. The numbers in
+the first half are measured; the conclusions that follow were then acted on, and
+`make test-cluster-cni` passes with Cilium as the node's CNI. The "Blocker"
+sections are kept as the record of what had to be solved, and each says whether it
+still applies.
 
 The roadmap says CNI is undecided and Cilium is the prod-parity choice. This is
 what choosing it would cost, and the issues found while looking.
@@ -137,10 +139,12 @@ remains is only that the hand-written pods are still pinned by `nodeName`, which
 is now redundant rather than necessary.
 
 It also needs to authenticate to the apiserver. The agent and operator use
-in-cluster config, i.e. a projected ServiceAccount token, but the test control
-plane runs `--disable-admission-plugins=ServiceAccount`, and the token controller
-that would populate that token also lives in kube-controller-manager. So
-enabling the DaemonSet path is not enough on its own.
+in-cluster config, i.e. a projected ServiceAccount token. Under the original
+throwaway control plane that was a blocker: it ran
+`--disable-admission-plugins=ServiceAccount` and had no kube-controller-manager, so
+nothing minted or mounted the token. The control-plane VM runs
+kube-controller-manager with admission left alone — `cmd/uinit` passes no such
+flag — and that is what made this part work.
 
 Two ways out: add kube-controller-manager to the harness (bigger, but closer to a
 real cluster), or mount the kubeconfig that the harness already splices into the

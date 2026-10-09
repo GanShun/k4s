@@ -150,9 +150,9 @@ mkdir -p build
 # /run/flannel/subnet.env and delegates the real work to bridge and host-local,
 # so all three have to be present for a pod to get an address.
 #
-# The node's production CNI is undecided (docs/cilium.md). flannel is here
-# because it needs nothing from the kernel that this one lacks, which is exactly
-# what cannot yet be said for Cilium.
+# flannel is the default CNI, with Cilium evaluated in docs/cilium.md and run by
+# the same harness under K4S_CNI=cilium. flannel is here because it needs nothing
+# from the kernel that this one lacks.
 (cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
 	go build -o ../build/loopback ./plugins/main/loopback)
 (cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \

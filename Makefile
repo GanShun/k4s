@@ -60,13 +60,13 @@ $(IMAGE): DIT
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# BTF generation needs pahole from the dwarves package. CONFIG_DEBUG_INFO_BTF
-# makes the kernel build run it over vmlinux, and without it the build fails in
-# the middle of compiling with an unhelpful error, so check up front.
+# BTF generation needs pahole. CONFIG_DEBUG_INFO_BTF makes the kernel build run it
+# over vmlinux, and without it the build fails in the middle of compiling with an
+# unhelpful error, so check up front.
 check-pahole:
 	@command -v $(PAHOLE) >/dev/null 2>&1 || { \
 		echo "pahole not found, and CONFIG_DEBUG_INFO_BTF needs it." >&2; \
-		echo "  Debian/Ubuntu: apt-get install dwarves" >&2; \
+		echo "  Debian/Ubuntu: apt-get install pahole (dwarves is only a metapackage)" >&2; \
 		echo "  or build it from https://github.com/acmel/dwarves" >&2; \
 		echo "  or point at one that is not on PATH: PAHOLE=/path/to/pahole make kernel" >&2; \
 		exit 1; \

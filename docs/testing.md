@@ -25,9 +25,11 @@ in what they install on the node.
 
 **`make test-all`** runs all three, in order of increasing cost. From a fresh
 checkout that is the whole story — `make linux` clones the pinned kernel checkout
-and `DIT` fetches everything else. Roughly: 2 minutes for `make test`, 75 seconds
-for two flannel boots, 210 seconds for two Cilium boots, whose agent has to
-install itself before the node can become Ready at all.
+and `DIT` fetches everything else. The legs themselves are roughly 2 minutes for
+`make test`, 75 seconds for two flannel boots and 210 seconds for two Cilium boots,
+whose agent has to install itself before the node can become Ready at all. A whole
+`make test-all` from a warm tree measures 545 s; the difference is the kernel and
+image builds those legs depend on.
 
 One caveat, recorded because it is real rather than because it is understood. The
 Cilium leg has been seen to fail at the end of its second boot with exit 255 and
@@ -55,6 +57,18 @@ is stuck in rather than only the exit, and it distinguishes "the same reason as
 last time" from "a new one" -- so a failure says what Cilium is waiting on
 instead of that something timed out.
 
+**A second, unrelated intermittent failure: the node's `uinit` stopping.** Once, a
+node boot ended with `uinit: containerd: ok` as its last line — no `kubelet:
+started`, no `done; the node is up` — and that run's console also showed
+`clocksource: Marking clocksource tsc unstable` and `TSC found unstable after boot,
+most likely due to broken BIOS`. It has not reproduced on demand.
+
+The harness cannot currently help with it, and that is the real finding. `make
+test` wraps QEMU in `timeout` and kills the guest when it expires, so a boot that
+never finishes leaves only its console log — and a console log says where something
+stopped, never why. Capturing guest state before killing the VM is the obvious next
+step, and is the reason this is recorded rather than diagnosed.
+
 ## How a cluster test runs
 
 Three things are involved, and it is worth being clear about which does what,
@@ -62,7 +76,7 @@ because the split is deliberate.
 
 | | What it is | What it does |
 | --- | --- | --- |
-| `scripts/test-cluster.sh` (1087 lines, 31 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
+| `scripts/test-cluster.sh` (1121 lines, 32 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
 | `cmd/uinit/main.go` (~380) | **both bring-ups, in the image** | the node's: network, sshd, mounts, cgroups, containerd, kubelet. The control plane's: network, etcd, apiserver, controller-manager, scheduler. Chosen by `/etc/k4s/role` |
 
 ### The VMs bring themselves up
@@ -181,8 +195,9 @@ was making it visible, and these mistakes were all mine.
 The harness fed the guest its whole script in one write; the guest's UART drops
 characters under that load, which mangled the script and made the guest stop
 partway through with no error. Every "empty log" and "missing file" observed
-during that period was a guest that had simply stopped executing. It is now fed
-one line at a time with a small delay.
+during that period was a guest that had simply stopped executing. The node is fed
+nothing now — that whole mechanism is gone, and the class of bug went with it. The
+control plane was the last thing fed, and `cmd/uinit` brings it up too.
 
 **A log has to be printed at exactly the right moment to be caught, and printing
 one takes minutes.** At 115200 baud, `cat`ing a Cilium agent log is thousands of

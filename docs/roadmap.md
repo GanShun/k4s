@@ -1,10 +1,17 @@
 # k4s: Diskless Worker Nodes — Design and Roadmap
 
-Status: early. The repository today builds a u-root initramfs containing
-`containerd`, `runc`, `flannel`, `coredns` and `etcdctl`. There is **no kubelet,
-no control plane, no kernel and no bootstrap path** yet. This document is the
-plan for getting to a working node and then to diskless GPU servers for LLM
-inference.
+Status: **M0 and M1 are done.** The repository builds a pinned kernel and a u-root
+initramfs carrying `containerd`, `runc`, `flannel`, `coredns`, `etcdctl` and
+`kubelet`, boots under QEMU, joins a throwaway control plane running in a second
+VM, runs a pod under a seccomp filter, and does it again after a reboot. M2
+(ephemeral hygiene and the kill switch) and M3 (GPU) are next.
+
+What is **not** done is the bootstrap path — see "Node credentials" below. The
+node's cluster credential is still spliced into the image per run.
+
+This document is both the plan for a working node and, as the milestones land,
+partly the record of how it got there, which is why some sections below still
+describe problems that have since been solved. Each says which it is.
 
 ## Target
 
