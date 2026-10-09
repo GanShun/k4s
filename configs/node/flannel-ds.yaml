@@ -54,9 +54,10 @@ spec:
         - name: flannel
           # Only for a shell and a filesystem; the program comes from /bbin.
           image: docker.io/library/busybox:1.36
-          # The log goes to a hostPath so the guest can print it: without a
-          # kubelet client certificate the apiserver cannot proxy logs from the
-          # kubelet, so `kubectl logs` does not work against this test cluster.
+          # The log goes to a hostPath: without a kubelet client certificate the
+          # apiserver cannot proxy logs from the kubelet, so `kubectl logs` does
+          # not work against this test cluster. The harness reads the file over
+          # ssh when it collects diagnostics.
           command:
             - /bin/sh
             - -c

@@ -6,8 +6,8 @@
 # works for pods nobody pinned by hand.
 #
 # It writes to a hostPath because the apiserver cannot reach kubelet here to
-# fetch logs; the guest prints the file and the harness reads it out of the
-# console.
+# fetch logs. The harness reads that file over ssh, not off the console -- the
+# console is `-serial file:` and is never grepped.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

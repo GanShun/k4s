@@ -169,9 +169,11 @@ one builds the filter the cgo build would install (libseccomp, plus the same
 about 4300 cases, and every difference it has found so far was a real bug, the
 64-bit one above included.
 
-It needs libseccomp and the `seccomp` build tag, so **`make test` and CI run it
-and a plain `go test ./...` does not**. Locally that means `libseccomp-dev` plus
-`pkg-config`, since `libseccomp-golang` is found through it.
+It needs libseccomp and the `seccomp` build tag, so a plain `go test ./...` does
+not run it. It is run by hand, in the fork, with `libseccomp-dev` and
+`pkg-config` installed -- `libseccomp-golang` is found through the latter. k4s
+only consumes the fork, so `make test` here exercises the compiled result against
+a real pod; it does not run this comparison.
 
 The one thing it cannot check is **x32**, the ILP32 ABI on x86-64. An x32
 syscall signals itself with bit 30 of the syscall number rather than through

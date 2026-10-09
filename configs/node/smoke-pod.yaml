@@ -4,9 +4,9 @@
 # would block in the sandbox network step. It also keeps this test about the
 # kubelet -> containerd -> runc path rather than about CNI, which is undecided.
 #
-# nodeName pins it to the node instead of going through the scheduler, because
-# the throwaway control plane in scripts/test-cluster.sh runs only etcd and
-# kube-apiserver (no scheduler, no controller-manager).
+# nodeName pins it to the node instead of going through the scheduler. The
+# control plane VM has a scheduler now, so this is a leftover from when it did
+# not; deploy-pod.yaml is what exercises scheduling.
 #
 # The container writes a marker to a hostPath so the guest can prove it ran
 # without the apiserver needing to reach kubelet to fetch logs.

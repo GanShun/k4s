@@ -128,9 +128,13 @@ workload pulls.
 
 ## Blocker 4: the throwaway control plane cannot run a DaemonSet
 
-`scripts/test-cluster.sh` runs etcd and kube-apiserver only, with the pods pinned
-by `nodeName` because there is no scheduler and no controller-manager. Cilium is
-a DaemonSet plus a Deployment, so it needs `kube-controller-manager`.
+**Resolved.** This was true when written: `scripts/test-cluster.sh` ran etcd and
+kube-apiserver only, with the pods pinned by `nodeName` because there was no
+scheduler and no controller-manager. The control plane is now a VM of its own
+running all four, so Cilium's DaemonSet plus Deployment are exactly the kind of
+workload the test wants, and `run_workloads` asserts both become ready. What
+remains is only that the hand-written pods are still pinned by `nodeName`, which
+is now redundant rather than necessary.
 
 It also needs to authenticate to the apiserver. The agent and operator use
 in-cluster config, i.e. a projected ServiceAccount token, but the test control
@@ -151,7 +155,7 @@ second is much less work and is enough to exercise the datapath.
   pulls in the largest block of extra kernel config above.
 - **The baked conflist has to go.** `NetworkPluginMaxConfNum` is 1 and go-cni
   sorts conf files lexicographically, so Cilium's `05-cilium.conflist` would win
-  over our `10-loopback.conflist` — but leaving a stale loopback conflist in
+  over our `10-flannel.conflist` — but leaving a stale flannel conflist in
   `/etc/cni/net.d` is a silent trap, and the loopback plugin binary becomes dead
   weight. Both should be removed when a real CNI lands, and the `netns` pod check
   in `test-cluster.sh` inverted into the positive one.
@@ -165,8 +169,10 @@ second is much less work and is enough to exercise the datapath.
 - **No bootstrap deadlock.** The agent is `hostNetwork`, and the operator is too
   by default, so both can start before any CNI exists. IPAM defaults to
   `cluster-pool`, which allocates per-node CIDRs through the `CiliumNode` CRD via
-  the operator — so it does *not* need kube-controller-manager's
-  `--allocate-node-cidrs`, which our control plane would not have anyway.
+  the operator, with no need for kube-controller-manager's `--allocate-node-cidrs`.
+  The shipped test does not use that mode: it sets `ipam.mode=kubernetes`, and the
+  control plane does pass `--allocate-node-cidrs=true`. That is the ordinary
+  per-node `podCIDR` path, and closer to what production will look like.
 - **bpffs**: Cilium mounts `/sys/fs/bpf` itself when it is not already mounted,
   and it is privileged, so the node does not have to pre-mount it.
 - **User namespaces**: not needed. `operator.hostUsers: true` is the default and
@@ -353,11 +359,13 @@ Cilium's datapath:
     keep the directory non-empty (a reasonable-sounding fix, since a directory
     with *no* conflist is `ErrCNINotInitialized`) is what caused this.
 
-    The fix is to put the conflist Cilium will write there before containerd
-    starts: the harness splices `configs/node/05-cilium.conflist` into the node
-    image and removes flannel's, so the directory contains exactly the right
-    plugin at the moment the CRI reads it. The agent rewrites the same file
-    identically when it becomes ready. With that, `make test-cluster` passes with
+    That pre-seeding was tried, and it "worked" — and it was wrong. It hid the
+    real requirement, which is an ordering one: the test must not hand
+    `containerd` a pod until the directory says what the pods need. Nothing is
+    spliced now. `run_cilium` waits until `05-cilium.conflist` — Cilium's own —
+    is on disk, and only then does the harness apply pods that ask for a network
+    namespace. The agent being *ready* is not that signal, which is what the
+    earlier version got wrong. With that, `make test-cluster-cni` passes with
     Cilium as the node's CNI: the agent runs, the node is Ready, a pod that asks
     for its own network namespace gets an address, and the DaemonSet and
     Deployment checks pass.

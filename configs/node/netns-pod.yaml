@@ -13,8 +13,8 @@
 # asserted that failure. Now that flannel is in the image this pod must run, and
 # the harness asserts an address in the flannel subnet instead.
 #
-# nodeName pins it as with the smoke pod: the throwaway control plane has no
-# scheduler.
+# nodeName pins it as with the smoke pod. See that file: the control plane has a
+# scheduler now, so the pin is a leftover rather than a constraint.
 apiVersion: v1
 kind: Pod
 metadata:

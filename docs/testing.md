@@ -50,9 +50,10 @@ stays responsive and the added latency is in QEMU's network path.
 That leaves the emulated network path as the suspect and load as the wrong
 variable. The one thing those probes never exercise is Cilium's own datapath
 installation — BPF attachment, routes, interface changes — which needs a real
-cluster to reproduce. Until someone does, the handling is the retry that
-`run_cilium` already has: the failure is now reported and absorbed instead of
-killing the run, and it is counted rather than hidden.
+cluster to reproduce. Until someone does, `run_cilium` names the state the agent
+is stuck in rather than only the exit, and it distinguishes "the same reason as
+last time" from "a new one" -- so a failure says what Cilium is waiting on
+instead of that something timed out.
 
 ## How a cluster test runs
 
@@ -61,7 +62,7 @@ because the split is deliberate.
 
 | | What it is | What it does |
 | --- | --- | --- |
-| `scripts/test-cluster.sh` (1017 lines, 30 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
+| `scripts/test-cluster.sh` (1087 lines, 31 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
 | `cmd/uinit/main.go` (~380) | **both bring-ups, in the image** | the node's: network, sshd, mounts, cgroups, containerd, kubelet. The control plane's: network, etcd, apiserver, controller-manager, scheduler. Chosen by `/etc/k4s/role` |
 
 ### The VMs bring themselves up
