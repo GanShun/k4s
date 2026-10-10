@@ -76,7 +76,7 @@ because the split is deliberate.
 
 | | What it is | What it does |
 | --- | --- | --- |
-| `scripts/test-cluster.sh` (1121 lines, 32 functions) | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
+| `scripts/test-cluster.sh` | the harness, on the host | builds the control plane, generates PKI, boots both VMs, applies manifests with `kubectl`, waits for results, reads diagnostics |
 | `cmd/uinit/main.go` (~380) | **both bring-ups, in the image** | the node's: network, sshd, mounts, cgroups, containerd, kubelet. The control plane's: network, etcd, apiserver, controller-manager, scheduler. Chosen by `/etc/k4s/role` |
 
 ### The VMs bring themselves up

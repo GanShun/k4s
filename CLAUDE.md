@@ -275,18 +275,14 @@ too: a 157-character line lost its redirect and its trailing `&`. A Go program
 has none of those problems, because the kernel runs it rather than a shell
 parsing it.
 
-**Neither VM is fed.** The control plane used to be, and `feed_guest` existed for
-it; it now has its own role in `cmd/uinit`, so the console is diagnostic-only
-everywhere. Its readiness is the apiserver answering on the forwarded port, which
-is what `wait_apiserver` polls, rather than markers printed for the harness to
-grep out of the console.
+**Neither VM is fed.** Both bring themselves up from `cmd/uinit`, so the console is
+diagnostic-only everywhere and readiness is a real signal rather than a marker: the
+control plane is ready when its apiserver answers on the forwarded port, which is
+what `wait_apiserver` polls.
 
-The harness reads the node's results over **ssh** (`collect`, `diag`). The console
-is used to get a script *in* to the control plane VM, never to get evidence *out*
-of the node: it drops characters under load, a log has to be printed at exactly
-the right moment to be caught at all, and printing one takes minutes at 115200
-baud, while a file read over ssh takes a second and does not care when it is read.
-See `docs/testing.md`.
+The harness reads the node's results over **ssh** (`collect`, `diag`); the console
+is captured to a file so a boot that fails says so, and nothing is read back from
+it. See `docs/testing.md`.
 
 The QEMU cmdline is
 `console=ttyS0,115200 panic=-1 cgroup_no_v1=all`. The last flag is not

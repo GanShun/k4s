@@ -1,17 +1,11 @@
 # An off-the-shelf stateless workload: stock nginx, unmodified.
 #
-# The other pods in this directory prove the *runtime* works -- that a container
-# starts, that it runs under a seccomp filter, that the CRI gives it a pod
-# address. This one proves a *published image* works: nginx exactly as its
-# maintainers ship it, with its own entrypoint, its own userspace, and no k4s
-# code in it at all.
-#
-# It is also the only pod here that has to *serve* rather than merely run, and
-# that shapes how it is verified. nginx has no shell command to hang a marker
-# off and writes nothing to a hostPath, so there is no file to read back the way
-# the other pods do. The node fetches the page from the pod's address over the
-# flannel bridge instead -- one assertion covering the whole path: registry
-# pull, image unpack, container start, pod network, and the server answering.
+# The other pods here carry k4s code and write a marker. This one is a published
+# image with its own entrypoint, and the only pod that has to *serve* rather than
+# run, so it is verified by fetching it. There is nothing to read back, so the node
+# fetches the page from the pod's address over the flannel bridge -- one assertion
+# covering the registry pull, the unpack, the container start, the pod network and
+# the reply.
 #
 # Pinned to a version tag, as the other pods here are. The digest that tag
 # resolved to when this test was written was

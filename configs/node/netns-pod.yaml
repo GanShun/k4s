@@ -1,20 +1,8 @@
 # The pod that needs a CNI.
 #
-# This is the half of the networking story the smoke pod cannot tell: the smoke
-# pod is hostNetwork and so never touches CNI, whereas this one asks for its own
-# network namespace and therefore only runs if a CNI actually assigns it an
-# address. It writes what it can see of its own interface to a hostPath, so the
-# test can check the address from both ends: the apiserver's view of
-# .status.podIP and the container's view of eth0.
-#
-# It has been both halves of that story. With only the loopback plugin on disk
-# containerd refused to create the sandbox ("failed to find network info for
-# sandbox ..."), because the CNI result had no address on eth0; the harness
-# asserted that failure. Now that flannel is in the image this pod must run, and
-# the harness asserts an address in the flannel subnet instead.
-#
-# nodeName pins it as with the smoke pod. See that file: the control plane has a
-# scheduler now, so the pin is a leftover rather than a constraint.
+# It asks for its own network namespace, so it only runs if a CNI assigns it an
+# address, and it records what it sees of eth0 so the address can be checked from
+# both ends: .status.podIP and the container's interface.
 apiVersion: v1
 kind: Pod
 metadata:

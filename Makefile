@@ -33,9 +33,10 @@ CNI_FRAGMENT := configs/k4s-cni.config
 IMAGE      := initramfs.cpio
 
 QEMU       := qemu-system-x86_64
-# pahole, from the dwarves package, is needed for CONFIG_DEBUG_INFO_BTF. The
-# kernel's own Makefile honours this variable, so point it at a binary that is
-# not on PATH with PAHOLE=/path/to/pahole make kernel.
+# pahole is needed for CONFIG_DEBUG_INFO_BTF. The kernel's own Makefile honours
+# this variable, so point it at a binary that is not on PATH with
+# PAHOLE=/path/to/pahole make kernel. On Debian and Ubuntu the package is `pahole`;
+# `dwarves` is only a metapackage that pulls it in.
 PAHOLE     ?= pahole
 # KVM when the user can reach /dev/kvm, otherwise fall back to TCG (slow).
 QEMU_ACCEL := $(shell [ -w /dev/kvm ] && echo "-enable-kvm -cpu host")

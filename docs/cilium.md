@@ -7,8 +7,8 @@ the first half are measured; the conclusions that follow were then acted on, and
 sections are kept as the record of what had to be solved, and each says whether it
 still applies.
 
-The roadmap says CNI is undecided and Cilium is the prod-parity choice. This is
-what choosing it would cost, and the issues found while looking.
+The roadmap ships flannel as the default. This is what choosing Cilium instead
+cost, and the issues found while looking.
 
 ## What Cilium puts on a node
 

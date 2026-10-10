@@ -72,10 +72,9 @@ apiserver only pair the test started with on the host.
   option 12 as fallback.
 - Join: TLS bootstrap with short-TTL node certs, a one-time or attested
   bootstrap credential, and reaping of stale `Node` objects.
-- Networking: CNI is undecided. Cilium for prod parity eventually, and it has
-  been evaluated against this node — the cost is mostly kernel: `docs/cilium.md`.
-  The node runs flannel today, so a pod with its own network namespace gets a
-  real address; see the networking section under M1.
+- Networking: flannel is the default; Cilium is evaluated in `docs/cilium.md` and
+  runs against this node under `K4S_CNI=cilium`. A pod with its own network
+  namespace gets a real address; see the networking section under M1.
 - Kill path (M2): watchdog plus an out-of-band power switch, per the intrusic
   threat model.
 

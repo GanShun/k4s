@@ -1,13 +1,10 @@
 # A DaemonSet, to prove the control plane can actually run one.
 #
-# The DaemonSet controller lives in kube-controller-manager, and it assigns the
-# node itself, so this needs no scheduler -- which is why it is the first thing
-# to test. The pod asks for its own network namespace, so it also proves the CNI
-# works for pods nobody pinned by hand.
-#
-# It writes to a hostPath because the apiserver cannot reach kubelet here to
-# fetch logs. The harness reads that file over ssh, not off the console -- the
-# console is `-serial file:` and is never grepped.
+# The DaemonSet controller lives in kube-controller-manager and assigns the node
+# itself, so this needs no scheduler. The pod asks for its own network namespace,
+# so it also proves the CNI works for pods nobody pinned by hand. It writes to a
+# hostPath because the apiserver cannot reach kubelet here to fetch logs; the
+# harness reads that over ssh.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

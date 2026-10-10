@@ -1,35 +1,32 @@
 # flanneld as a DaemonSet, which is how it is deployed for real.
 #
-# It runs the flanneld that is already in the node image, out of /bbin, rather
-# than pulling flannel's own container image. That is deliberate: this image
-# builds flanneld from the pure-Go fork (see DIT), and pulling the upstream
-# image would replace that with a glibc build and a second copy of the same
-# program. The node's image is the unit of configuration here -- the CNI plugin
-# and the conflist are baked for the same reason -- so the DaemonSet's job is to
-# run it with the right privileges and mounts, not to supply it.
+# It runs the flanneld already in the node image, out of /bbin, rather than pulling
+# flannel's image: this image builds flanneld from the pure-Go fork (see DIT) and
+# the upstream image would replace that with a glibc build. The image is the unit of
+# configuration, so the DaemonSet supplies privileges and mounts, not the program.
 #
-# hostNetwork is not optional: flanneld programs the host's routing table, so it
-# has to be in the host's network namespace, and it must start before any pod
-# that needs a network, which hostNetwork also makes possible. Nothing needs the
-# CNI to start the CNI.
+# hostNetwork is not optional: flanneld programs the host's routing table and must
+# start before any pod that needs a network. Nothing needs the CNI to start the CNI.
 #
-# NODE_NAME is what tells flanneld which Node object to annotate and take a
-# subnet lease from. Running as a pod it could use POD_NAME/POD_NAMESPACE and
-# look itself up, but the downward API handing it the node directly is simpler
-# and skips a round trip to the apiserver.
+# Three things here are load-bearing rather than tidy:
 #
-# It authenticates with its service account, which is why the control plane has
-# ServiceAccount admission on: this pod is the first thing here to talk to the
-# apiserver from inside a pod.
+#   NODE_NAME   which Node object to annotate and take a subnet lease from. Running
+#               as a pod it could look itself up through POD_NAME/POD_NAMESPACE, but
+#               the downward API handing it the node directly skips that round trip.
 #
-# KUBERNETES_SERVICE_HOST/PORT are set explicitly, and that is not a detail.
-# In-cluster configuration normally points at the `kubernetes` service's
-# ClusterIP, and reaching a ClusterIP needs service routing -- kube-proxy, or a
-# CNI that replaces it. This node has neither yet, so the ClusterIP is a
-# black hole and flanneld would never reach the apiserver. Pointing it at the
-# apiserver's real address is the same escape hatch Cilium exposes as
-# k8sServiceHost, for the same reason. kubelet only injects the ClusterIP
-# values when the pod does not set them itself, so these win.
+#   KUBERNETES_SERVICE_HOST/PORT
+#               in-cluster config points at the `kubernetes` service's ClusterIP,
+#               and reaching a ClusterIP needs service routing -- kube-proxy, or a CNI
+#               that replaces it. This node has neither, so the ClusterIP is a black
+#               hole and flanneld would never reach the apiserver. The apiserver's
+#               real address is the same escape hatch Cilium exposes as k8sServiceHost.
+#               kubelet only injects the ClusterIP values when the pod does not set
+#               them itself, so these win.
+#
+#   the service account
+#               it authenticates with its SA, which is why the control plane has
+#               ServiceAccount admission on: this pod is the first thing here to talk
+#               to the apiserver from inside a pod.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
