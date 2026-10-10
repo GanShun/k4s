@@ -35,29 +35,42 @@ fi
 
 echo "booting $KERNEL with $IMAGE (timeout ${K4S_BOOT_TIMEOUT}s)"
 
-# timeout kills QEMU; the guest is expected to power itself off first.
-set +e
+# timeout kills QEMU; the guest is expected to power itself off first. The `||`
+# rather than a `set +e` around it: bash fires an ERR trap for a plain failing
+# command even when errexit is off, so `set +e` still produced a spurious "failed
+# at line 40" on every run, including ones that passed.
+rc=0
 timeout "$K4S_BOOT_TIMEOUT" qemu-system-x86_64 \
 	-M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
 	-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 	-kernel "$KERNEL" -initrd "$IMAGE" \
 	-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
 	-nographic -no-reboot \
-	< "$CHECK" > "$LOG" 2>&1
-rc=$?
-set -e
+	< "$CHECK" > "$LOG" 2>&1 || rc=$?
 
 echo "--- guest output (tail) ---"
 tail -40 "$LOG"
 echo "---------------------------"
 
-# The guest echoes the script as it runs, so a literal "fail" also appears in
-# the echoed source. Strip ANSI escapes and gosh prompt lines so only real
-# output is inspected.
+# The guest echoes the script as it is fed, so the *source text* of every marker
+# is in the log whether or not anything ran. That made this whole check a false
+# pass: a guest that hung before init fell through to a shell went down as
+# "boot: ok, capabilities: ok, container: ok".
+#
+# Two guards. Every marker is matched as a whole line, because the echo has them
+# mid-line (`echo "K4S_CHECK_END"`, `ctr run ... K4S_CONTAINER_OK`) and only real
+# output is a bare line. And `uinit: done` gates the lot, since the fed script
+# cannot run until uinit exits and that string appears nowhere in it.
 CLEAN=$(mktemp -t k4s-clean.XXXXXX)
 sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" | grep -v '^\$ ' > "$CLEAN" || true
 
-if ! grep -q "K4S_CHECK_END" "$CLEAN"; then
+if ! grep -q 'uinit: done' "$CLEAN"; then
+	echo "boot: FAILED (the node never finished bringing itself up; qemu rc=$rc, log $LOG)" >&2
+	grep -a '^uinit:' "$CLEAN" | tail -20 >&2
+	exit 1
+fi
+
+if ! grep -qx "K4S_CHECK_END" "$CLEAN"; then
 	echo "boot: FAILED (no end marker; qemu rc=$rc, log $LOG)" >&2
 	exit 1
 fi
@@ -70,7 +83,7 @@ fi
 echo "capabilities: ok"
 
 # The container's own output is the proof it actually ran.
-if ! grep -q "K4S_CONTAINER_OK" "$CLEAN"; then
+if ! grep -qx "K4S_CONTAINER_OK" "$CLEAN"; then
 	echo "container: FAILED (marker not seen)" >&2
 	exit 1
 fi
