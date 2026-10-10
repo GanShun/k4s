@@ -1,14 +1,23 @@
 #!/bin/bash
 #
-# Boot the k4s image under QEMU and run scripts/guest-check.sh inside it.
+# Boot the k4s image under QEMU and run scripts/guest-check.sh inside it over ssh.
 #
-# The image's default shell is u-root's gosh, which treats a non-tty stdin as
-# a script. QEMU's -nographic wires the guest serial console to our stdin, so
-# piping the check script in is enough to drive it non-interactively.
+# The check script used to be piped into the serial console, because u-root's gosh
+# treats a non-tty stdin as a script. That is the wrong instrument, for the reason
+# docs/testing.md already gives about the cluster harness: the console drops
+# characters under load, it echoes what it is fed back into its own log, and the
+# echo of the script is indistinguishable from the script having run. It reported
+# three green verdicts for a guest that never executed anything.
+#
+# So this does what test-cluster.sh does: sshd comes up in the node's first
+# seconds, the harness uses a throwaway key it splices into the image, and the
+# evidence is the remote command's own stdout. Nothing is fed to the console, and
+# the console is kept only so that a boot that fails to come up says where.
 #
 # Usage: test-boot.sh <kernel> <initramfs> [guest-script]
 #
 # Env: K4S_BOOT_TIMEOUT  seconds to wait for the guest (default 180)
+#      K4S_SSH_PORT      host port forwarded to the node's sshd (default 2222)
 
 set -Eeuo pipefail
 
@@ -23,7 +32,10 @@ IMAGE=${2:?usage: test-boot.sh <kernel> <initramfs> [guest-script]}
 CHECK=${3:-$(dirname "$0")/guest-check.sh}
 
 K4S_BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-180}
+K4S_SSH_PORT=${K4S_SSH_PORT:-2222}
+
 LOG=$(mktemp -t k4s-boot.XXXXXX.log)
+WORK=$(mktemp -d -t k4s-boot.XXXXXX)
 trap 'echo "guest log: $LOG"' EXIT
 
 ACCEL=()
@@ -33,59 +45,107 @@ else
 	echo "note: /dev/kvm not writable; falling back to TCG (slow)" >&2
 fi
 
+# A throwaway key pair, never committed and valid only for this VM on a loopback
+# port. The node image itself carries no key.
+log_ssh_dir=$WORK/root/etc/ssh
+mkdir -p "$log_ssh_dir"
+ssh-keygen -q -t rsa -b 2048 -N '' -f "$WORK/host_rsa"
+ssh-keygen -q -t rsa -b 2048 -N '' -f "$WORK/client"
+cp "$WORK/client.pub" "$log_ssh_dir/authorized_keys"
+cp "$WORK/host_rsa" "$log_ssh_dir/host_rsa"
+
+# Splice them in by appending a small cpio to the image rather than repacking it:
+# the kernel unpacks an initramfs in order and a later entry replaces an earlier
+# one, so this is both cheaper and harder to get wrong than rewriting 228 MB.
+#
+# The image is otherwise the one `make image` produced -- the same image the
+# cluster test and a real node would boot -- so what is under test here is the
+# node's own bring-up in cmd/uinit and not a harness-shaped variant of it.
+(cd "$WORK/root" && find . | cpio -o -H newc -R 0:0 2>/dev/null) > "$WORK/override.cpio"
+cat "$IMAGE" "$WORK/override.cpio" > "$WORK/initramfs.cpio"
+
 echo "booting $KERNEL with $IMAGE (timeout ${K4S_BOOT_TIMEOUT}s)"
 
-# timeout kills QEMU; the guest is expected to power itself off first. The `||`
-# rather than a `set +e` around it: bash fires an ERR trap for a plain failing
-# command even when errexit is off, so `set +e` still produced a spurious "failed
-# at line 40" on every run, including ones that passed.
+# tsc=unstable is not optional on this host: the guest's TSC is skewed under KVM,
+# the kernel marks it unstable partway through the boot, and the console wedges at
+# that moment. It is a property of the test VM, not of the node, so it belongs
+# here and not in configs/ or in uinit.
+#
+# -serial file: rather than -nographic, so the console is a diagnostic record and
+# nothing depends on the guest's stdin. tsc=unstable above is what makes the boot
+# itself reliable; this is what makes a failure readable.
 rc=0
 timeout "$K4S_BOOT_TIMEOUT" qemu-system-x86_64 \
 	-M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
-	-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-	-kernel "$KERNEL" -initrd "$IMAGE" \
-	-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
-	-nographic -no-reboot \
-	< "$CHECK" > "$LOG" 2>&1 || rc=$?
+	-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$K4S_SSH_PORT-:2022 \
+	-device virtio-net-pci,netdev=n0 \
+	-kernel "$KERNEL" -initrd "$WORK/initramfs.cpio" \
+	-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all tsc=unstable" \
+	-serial "file:$LOG" -display none -no-reboot &
+qpid=$!
+
+# sshd is uinit's, and it starts in the node's first seconds, so waiting for it is
+# also waiting for uinit to have run. Poll rather than sleep a budget: a boot that
+# is ready in six seconds should not cost two minutes.
+#
+# A connect to a guest whose sshd has not started yet succeeds -- QEMU's user-mode
+# networking accepts the connection before anything is listening -- and then ssh
+# waits for a banner that never comes. ConnectTimeout, not a longer sleep, is what
+# handles that.
+ssh_do() {
+	timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+		-i "$WORK/client" -p "$K4S_SSH_PORT" root@127.0.0.1 "$@"
+}
+
+deadline=$((SECONDS + K4S_BOOT_TIMEOUT))
+until ssh_do true >/dev/null 2>&1; do
+	if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$qpid" 2>/dev/null; then
+		[ "$rc" = 0 ] && rc=124
+		break
+	fi
+	sleep 1
+done
+
+# The script runs as the remote command's stdin, with gosh on the other end of
+# it. sshd runs its shell as `<shell> -c <command>`, and gosh's shell is
+# /bin/sh, so the command is `/bin/sh`: the outer gosh runs the inner one, which
+# with no command of its own reads stdin as a script. `sh -s` looked right and is
+# not -- gosh has no -s, so it errored out and printed bb's applet list.
+#
+# gosh reads that script a line at a time, so lines still have to stay short
+# enough not to wrap; that is the one console-era constraint that survives.
+ssh_do '/bin/sh' < "$CHECK" > "$WORK/out" 2>&1 || rc=$?
+
+kill "$qpid" 2>/dev/null || true
+wait "$qpid" 2>/dev/null || true
 
 echo "--- guest output (tail) ---"
-tail -40 "$LOG"
+tail -40 "$WORK/out"
+if [ -s "$WORK/out" ]; then
+	echo "--- console (tail) ---"
+	tail -15 "$LOG"
+fi
 echo "---------------------------"
 
-# The guest echoes the script as it is fed, so the *source text* of every marker
-# is in the log whether or not anything ran. That made this whole check a false
-# pass: a guest that hung before init fell through to a shell went down as
-# "boot: ok, capabilities: ok, container: ok".
-#
-# Two guards. Every marker is matched as a whole line, because the echo has them
-# mid-line (`echo "K4S_CHECK_END"`, `ctr run ... K4S_CONTAINER_OK`) and only real
-# output is a bare line. And `uinit: done` gates the lot, since the fed script
-# cannot run until uinit exits and that string appears nowhere in it.
-CLEAN=$(mktemp -t k4s-clean.XXXXXX)
-sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" | grep -v '^\$ ' > "$CLEAN" || true
-
-if ! grep -q 'uinit: done' "$CLEAN"; then
-	echo "boot: FAILED (the node never finished bringing itself up; qemu rc=$rc, log $LOG)" >&2
-	grep -a '^uinit:' "$CLEAN" | tail -20 >&2
-	exit 1
-fi
-
-if ! grep -qx "K4S_CHECK_END" "$CLEAN"; then
-	echo "boot: FAILED (no end marker; qemu rc=$rc, log $LOG)" >&2
+if ! grep -qx 'K4S_CHECK_START' "$WORK/out" || ! grep -qx 'K4S_CHECK_END' "$WORK/out"; then
+	echo "boot: FAILED (the check did not run to completion; ssh rc=$rc, log $LOG)" >&2
+	echo "last console lines:" >&2
+	tail -20 "$LOG" >&2
 	exit 1
 fi
 echo "boot: ok"
 
-if grep -qE '^K4S_CHECK:.*: fail' "$CLEAN"; then
+if grep -qE '^K4S_CHECK:.*: fail' "$WORK/out"; then
 	echo "capabilities: FAILED" >&2
+	grep -aE '^K4S_CHECK:.*: fail' "$WORK/out" >&2
 	exit 1
 fi
 echo "capabilities: ok"
 
 # The container's own output is the proof it actually ran.
-if ! grep -qx "K4S_CONTAINER_OK" "$CLEAN"; then
+if ! grep -qx 'K4S_CONTAINER_OK' "$WORK/out"; then
 	echo "container: FAILED (marker not seen)" >&2
 	exit 1
 fi
 echo "container: ok"
-rm -f "$CLEAN"

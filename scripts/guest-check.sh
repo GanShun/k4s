@@ -1,10 +1,12 @@
 #!/bin/sh
 #
-# Capability check run inside the k4s image over the serial console.
+# Capability check run inside the k4s image over ssh, as `sh -s` with this file
+# on stdin.
 #
-# The guest console is a tty, so u-root's gosh runs interactively and executes
-# this one line at a time. Every line must be a complete command: no multi-line
-# if/for blocks, and keep lines short enough not to wrap.
+# It is a normal shell script: it runs once, in one process, with real control
+# flow. It used to be fed to the serial console one line at a time, which meant
+# every line had to be a complete command and short enough not to wrap, because
+# the console drops characters under load.
 #
 # uinit has already brought the image up by the time this runs: the network, the
 # cgroup2 hierarchy, the tmpfs mounts and containerd are all its work. This used
@@ -53,4 +55,7 @@ ctr run --rm --rootfs /run/rootfs k4stest /bin/echo K4S_CONTAINER_OK </dev/null
 echo "K4S_CHECK: container: done"
 
 echo "K4S_CHECK_END"
-poweroff
+
+# No poweroff: the harness owns the VM's lifetime, and a guest that powers itself
+# off while its own ssh session is still draining can truncate the output this
+# whole check is read from.
