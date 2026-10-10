@@ -150,7 +150,8 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `Makefile` | `image`/`kernel`/`run`/`test`/`test-cluster`/`test-cluster-cni`/`test-all` wrappers |
 | `configs/k4s-tiny.config` | Kernel fragment appended over `tinyconfig` |
 | `configs/k4s-cni.config` | Second kernel fragment, also always applied: what Cilium needs |
-| `configs/node/` | Node config baked into the image: kubelet config, passwd/group/hosts, CNI conflists, pod manifests |
+| `configs/node/` | The node's own definition, baked into the image by `DIT`: kubelet config, `role`, passwd/group/hosts, CNI conflists |
+| `examples/` | Workloads applied to a cluster afterwards — smoke/netns/log pods, DaemonSet, Deployment, nginx. Not baked in |
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |

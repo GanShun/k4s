@@ -75,13 +75,18 @@ SERVER="https://10.0.2.2:$PORT"
 NODE_IMAGE=$CP/node-test.cpio
 CP_IMAGE=$CP/controlplane-image.cpio
 CONFIGS=$(dirname "$0")/../configs/node
-POD=$CONFIGS/smoke-pod.yaml
-NETNS_POD=$CONFIGS/netns-pod.yaml
-NGINX_POD=$CONFIGS/nginx-pod.yaml
-DS=$CONFIGS/ds-pod.yaml
-LOGPOD=$CONFIGS/log-pod.yaml
-FLANNEL_DS=$CONFIGS/flannel-ds.yaml
-DEPLOY=$CONFIGS/deploy-pod.yaml
+# Workloads are examples; the node's own definition is configs/node. DIT bakes the
+# latter into the image and these are applied to a cluster afterwards, and keeping
+# them apart is what lets DIT be one build of the node definition rather than the
+# only thing that can consume it.
+EXAMPLES=$(dirname "$0")/../examples
+POD=$EXAMPLES/smoke-pod.yaml
+NETNS_POD=$EXAMPLES/netns-pod.yaml
+NGINX_POD=$EXAMPLES/nginx-pod.yaml
+DS=$EXAMPLES/ds-pod.yaml
+LOGPOD=$EXAMPLES/log-pod.yaml
+FLANNEL_DS=$EXAMPLES/flannel-ds.yaml
+DEPLOY=$EXAMPLES/deploy-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the

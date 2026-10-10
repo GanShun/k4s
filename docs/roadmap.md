@@ -103,7 +103,7 @@ apiserver only pair the test started with on the host.
 **control plane VM** (etcd, kube-apiserver, kube-controller-manager and
 kube-scheduler, all built from the pinned sources and carrying a per-run PKI),
 issues a kubelet kubeconfig, splices it into a copy of the initramfs, boots the
-node, waits for it to register, applies `configs/node/smoke-pod.yaml`, and checks
+node, waits for it to register, applies `examples/smoke-pod.yaml`, and checks
 the container wrote its marker to a hostPath. It then boots the *same image*
 again and checks the node rejoins and the pod returns.
 
@@ -151,7 +151,7 @@ worth having answered early. See `docs/testing.md`.
 The image ships a real CNI: the flannel meta-plugin and its bridge and
 host-local delegates, all pinned, with the network config baked at
 `/etc/kube-flannel/net-conf.json` (host-gw, because this kernel has no VXLAN).
-flanneld itself runs as a **DaemonSet** (`configs/node/flannel-ds.yaml`), the way
+flanneld itself runs as a **DaemonSet** (`examples/flannel-ds.yaml`), the way
 it is deployed for real, out of the node's own `/bbin` rather than from flannel's
 container image: this image builds flanneld from the pure-Go fork, and pulling
 the upstream image would replace that with a glibc build of the same program.
