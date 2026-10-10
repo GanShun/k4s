@@ -33,6 +33,13 @@
 # harness has what it needs, and every wait in this script is individually
 # bounded. A fixed "kill it after N seconds" bound used to sit on top of that and
 # mostly served to hide the waits that were too long.
+#
+# Evidence always comes out of the guest over ssh, never off the console: the
+# console drops characters under load, a log has to be printed at exactly the
+# right moment to be caught at all, and catting one to a 115200-baud line takes
+# minutes, while a file read over ssh does not care when it is read. That is the
+# whole reason sshd is in the image. The console is captured to a file so that a
+# boot which fails to come up says so, and nothing is ever read back from it.
 
 set -Eeuo pipefail
 
@@ -496,16 +503,7 @@ stop_guest() {
 	kill -9 "$pid" 2>/dev/null || true
 }
 
-# Wait only for the Node object, not for it to be Ready. When the CNI installs
-# its own config -- Cilium does -- the node cannot become Ready until that has
-# happened, so waiting for Ready before applying the CNI is a deadlock: nothing
-# would ever run the DaemonSet that makes the node Ready.
-# Read files out of the guest over ssh. This is the whole reason sshd is in the
-# image: the serial console cannot be trusted with bulk output, a file that is
-# read does not have to be printed at the right moment to be caught, and catting
-# a log to a 115200-baud line takes minutes.
-#
-# Two things here are load-bearing rather than stylistic.
+# Two things in guest_get are load-bearing rather than stylistic.
 #
 # `timeout`, because ConnectTimeout bounds only the TCP connect -- and QEMU's user
 # networking port forward accepts the connection immediately whether or not
@@ -573,27 +571,18 @@ wait_ssh() {
 	return 1
 }
 
-# Everything worth knowing about a failed run, read out of the guest over ssh
-# while it is still alive. This is what sshd is in the image for. The serial
-# console cannot do this job: a log has to be printed at exactly the right
-# moment to be caught, catting one to a 115200-baud line takes minutes, and
-# handing the console too much at once corrupts the guest's own script. A file
-# that is read does not have to be printed at any particular moment at all.
-# Pull everything the checks and the diagnostics need out of the guest while it
-# is still up, and keep it on the host. This is the reason sshd is in the image:
-# the serial console cannot be trusted with bulk output, a log takes minutes to
-# Wait for a file-backed marker to appear in the guest, then read it.
+# Wait for a marker to appear in the guest, then read it. Running does not mean
+# the container has run its first instruction, and /var/log is a tmpfs, so after a
+# reboot the marker is gone and has to be written again.
 #
-# A pod that reports Running has not necessarily run its first instruction yet,
-# and /var/log is a tmpfs -- after a reboot the marker is gone and has to be
-# written again. Nothing here waits on the pod itself, so without this the read
-# races the container. It gives up quietly: whether an absent marker is a failure
-# is the verdict of the check that reads the file, not this one's.
+# Matched on the marker's token, not on the file being non-empty: guest_get
+# returns 0 and prints its diagnostic to stdout on every failure path, so an ssh
+# blip would both satisfy a size test and be recorded as if it were evidence.
 wait_marker() {
-	local guest_path=$1 out=$2 i
+	local guest_path=$1 out=$2 want=$3 i
 	for i in $(seq 1 15); do
 		guest_get "cat $guest_path 2>/dev/null" > "$out"
-		if [ -s "$out" ]; then
+		if grep -q "$want" "$out"; then
 			return 0
 		fi
 		sleep 2
@@ -615,11 +604,9 @@ grab_guest_logs() {
 	guest_get 'cat /var/log/k4s-flannel/flannel.log' > "$d/flannel.log" 2>/dev/null || true
 }
 
-# Pull everything the checks and the diagnostics need, while the guest is still
-# up -- and before stop_guest, because none of it survives the VM. Quiet: diag()
-# prints the summary when a check fails. The console is not an evidence path -- it
-# drops characters under load, and a log has to be printed at exactly the right
-# moment to be caught at all; a file that is read does not.
+# Everything the checks and the diagnostics need, gathered while the guest is up
+# and before stop_guest -- none of it survives the VM. Quiet; diag() prints the
+# summary when a check fails.
 collect() {
 	local d=$CP/diag m
 	mkdir -p "$d" "$CP/markers"
@@ -627,9 +614,15 @@ collect() {
 	# let a check pass on evidence this run did not produce.
 	rm -f "$CP/markers"/*
 	for m in smoke netns ds deploy; do
-		wait_marker "/var/log/k4s-$m/result" "$CP/markers/$m"
+		case $m in
+			smoke)  want=K4S_POD_OK ;;
+			netns)  want=K4S_NETNS_OK ;;
+			ds)     want=K4S_DS_OK ;;
+			deploy) want=K4S_DEPLOY_OK ;;
+		esac
+		wait_marker "/var/log/k4s-$m/result" "$CP/markers/$m" "$want"
 	done
-	wait_marker '/var/log/pods/*k4s-log*/log/*.log' "$CP/markers/log"
+	wait_marker '/var/log/pods/*k4s-log*/log/*.log' "$CP/markers/log" K4S_LOG_OK
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
 	# over the pod network instead, which is also the assertion that the pod
@@ -658,6 +651,8 @@ collect() {
 	guest_get 'ls /etc/cni/net.d; ls /opt/cni/bin' > "$d/cni-files" 2>/dev/null || true
 }
 
+# What a failed check prints: the markers, read out of the guest over ssh while
+# it is still alive.
 diag() {
 	local d=$CP/diag m
 	mkdir -p "$d"
