@@ -29,10 +29,22 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-runc
+
+# Cloned build inputs (runc is a clone of the fork; see DIT)
+/runc/
 container*
+cni-plugins
 u-root
+kubernetes
 flannel
+flannel-cni-plugin
 initram*cpio
 coredns
 etcd
+
+# Kernel source checkout (kept out of the repo) and kernel build output
+/linux/
+/build/
+
+# pi agent task logs (tool-internal, not part of the project)
+.pi/

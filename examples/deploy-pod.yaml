@@ -1,0 +1,36 @@
+# A Deployment, to prove the scheduler places pods.
+#
+# Nothing pins this one to a node: the ReplicaSet controller in
+# kube-controller-manager creates the pod and kube-scheduler decides where it
+# goes, so it only runs if both are working. The DaemonSet next to it exercises
+# the controller-manager alone.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k4s-deploy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k4s-deploy
+  template:
+    metadata:
+      labels:
+        app: k4s-deploy
+    spec:
+      containers:
+        - name: deploy
+          image: docker.io/library/busybox:1.36
+          command:
+            - "sh"
+            - "-c"
+            - "exec 2>>/out/result; echo K4S_DEPLOY_OK >> /out/result; sleep 3600"
+          volumeMounts:
+            - name: out
+              mountPath: /out
+      volumes:
+        - name: out
+          hostPath:
+            path: /var/log/k4s-deploy
+            type: DirectoryOrCreate

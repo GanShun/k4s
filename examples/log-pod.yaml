@@ -1,0 +1,22 @@
+# A pod whose only job is to write to stdout.
+#
+# Every other pod here writes its evidence to a hostPath, which means nothing
+# has ever exercised the path a container's stdout takes: runtime -> shim ->
+# /var/log/pods. Cilium's agent logs to stderr and its log file is empty, so
+# that path is exactly what is in question, and this pod is the cheapest way to
+# ask whether the node captures container output at all.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-log
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  restartPolicy: Always
+  containers:
+    - name: log
+      image: docker.io/library/busybox:1.36
+      command:
+        - "sh"
+        - "-c"
+        - "echo K4S_LOG_OK; ip addr show eth0 | grep 'inet '; sleep 3600"

@@ -1,22 +1,203 @@
 #!/bin/bash
+#
+# DIT - build the k4s initramfs.
+#
+# Fetches each component over HTTPS at an exact pinned revision, tidies it, and
+# assembles a single BusyBox-style initramfs with gobusybox.
+#
+# Two deliberate changes from the original script:
+#
+#   * HTTPS instead of SSH. These repositories are public, so no key material
+#     is needed: the build runs on a clean host or CI runner, and nothing
+#     secret can leak into the log or into a checkout's .git/config.
+#
+#   * Exact revisions instead of `--depth 1` on default branches. Branch tips
+#     move, so the original produced a different dependency graph on every run;
+#     the current containerd tip, for example, already requires Go 1.27. The
+#     revisions below are the upstream tips from the era this repository was
+#     written (2026-05-01 through 2026-05-12). They are all `go` <= 1.26.2, so
+#     they remain valid for the committed go.work. Move a component by editing
+#     its *_REF deliberately.
+#
+# go.work is committed and is NOT regenerated here: it already lists every
+# module below, and it carries the dependency pin the build relies on. Note
+# that `go work init` refuses to overwrite an existing workspace, so the old
+# `go work init u-root` line was a silent no-op and has been removed.
 
-set -x
+set -euxo pipefail
 
-git clone --depth 1 git@github.com:u-root/u-root
-go work init u-root
-# git clone --depth 1 git@github.com:k3s-io/k3s.git
-git clone --depth 1 git@github.com:containerd/containerd
-git clone --depth 1 git@github.com:coredns/coredns.git
-git clone --depth 1 git@github.com:etcd-io/etcd.git
-git clone --depth 1 -b purego git@github.com:u-root/flannel
-git clone --depth 1 -b purego git@github.com:u-root/runc
+# --- pinned revisions -------------------------------------------------------
+UROOT_REPO=https://github.com/u-root/u-root.git
+UROOT_REF=25f9f897fcf2d5431b43daccc970215713547268       # main, 2026-05-01
 
-set -e
+CONTAINERD_REPO=https://github.com/containerd/containerd.git
+CONTAINERD_REF=ed061a08de19ce99d223c60dfdbdf6054dd94290  # main, 2026-05-01
+
+COREDNS_REPO=https://github.com/coredns/coredns.git
+COREDNS_REF=145029c847d3f4c4d36918f8658631f40616745f     # master, 2026-05-01
+
+ETCD_REPO=https://github.com/etcd-io/etcd.git
+ETCD_REF=0bd70ca863d9f36c2776ef7f38cd35f12cca8d4a       # main, 2026-05-01
+
+FLANNEL_REPO=https://github.com/u-root/flannel.git
+FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (pure-Go proxy)
+
+# runc is the one component this project has a fork of and develops, so it is
+# built from the checkout in runc/ as it stands rather than being reset to a
+# revision: a local branch, or an uncommitted change, is exactly what you want
+# to test. RUNC_REF only creates that checkout when there is not one, so a clean
+# tree still builds, and the revision that goes into the image is printed either
+# way. Everything else here is pinned strictly.
+RUNC_REPO=https://github.com/GanShun/runc.git
+RUNC_REF=d8fe9e94fe4b6bdced1cf1d2f3ea325a896322ea  # purego-seccomp, 2026-10-05
+
+KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
+KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8
+
+CNI_REPO=https://github.com/containernetworking/plugins.git
+CNI_REF=257ef09a103e8b8fe91a0fefe8680c01f84b520b           # main, 2026-09-15
+
+# flanneld is only half of flannel. The CNI half is a separate repository: a
+# meta-plugin that reads the subnet flanneld allocated out of
+# /run/flannel/subnet.env and invokes bridge and host-local with it.
+FLANNEL_CNI_REPO=https://github.com/flannel-io/cni-plugin.git
+FLANNEL_CNI_REF=b380f201008e9bed159703846cf10d3c50b4f9ce  # v1.9.1-flannel3
+
+# --- fetch ------------------------------------------------------------------
+# Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
+# what makes the image reproducible. An existing checkout is reused, so a rerun
+# after a failed build does not die on "destination path already exists".
+clone_pinned() {
+	local dir=$1 repo=$2 ref=$3
+	if [ ! -e "$dir" ]; then
+		git init -q "$dir"
+		git -C "$dir" remote add origin "$repo"
+	elif [ ! -d "$dir/.git" ]; then
+		echo "error: $dir exists and is not a git checkout" >&2
+		exit 1
+	fi
+	git -C "$dir" remote set-url origin "$repo"
+	git -C "$dir" fetch -q --depth 1 origin "$ref"
+	git -C "$dir" checkout -q --detach FETCH_HEAD
+}
+
+echo "Fetching pinned components"
+clone_pinned u-root     "$UROOT_REPO"     "$UROOT_REF"
+clone_pinned containerd "$CONTAINERD_REPO" "$CONTAINERD_REF"
+clone_pinned coredns    "$COREDNS_REPO"    "$COREDNS_REF"
+clone_pinned etcd       "$ETCD_REPO"       "$ETCD_REF"
+clone_pinned flannel    "$FLANNEL_REPO"    "$FLANNEL_REF"
+clone_pinned kubernetes "$KUBERNETES_REPO" "$KUBERNETES_REF"
+clone_pinned cni-plugins "$CNI_REPO" "$CNI_REF"
+clone_pinned flannel-cni-plugin "$FLANNEL_CNI_REPO" "$FLANNEL_CNI_REF"
+
+# runc is used as checked out, not reset to a revision (see the note by its pin).
+if [ ! -e runc ]; then
+	echo "runc: no checkout, cloning $RUNC_REF"
+	clone_pinned runc "$RUNC_REPO" "$RUNC_REF"
+fi
+if [ ! -d runc/.git ]; then
+	echo "error: runc exists and is not a git checkout" >&2
+	exit 1
+fi
+echo "runc: building $(git -C runc rev-parse --short HEAD)" \
+	"($(git -C runc rev-parse --abbrev-ref HEAD)," \
+	"$(git -C runc status --porcelain | wc -l) modified files)"
+if [ "$(git -C runc rev-parse HEAD)" != "$RUNC_REF" ]; then
+	echo "note: runc/ is not the pinned $RUNC_REF; building the local checkout"
+fi
+
+# --- tidy -------------------------------------------------------------------
 (cd containerd && go mod tidy)
 (cd coredns && go mod tidy)
 (cd etcd/etcdctl && go mod tidy)
 (cd flannel && go mod tidy)
-(cd runc && go mod tidy)
-(cd u-root && go mod tidy && GOARCH= GOOS= go build)
-./u-root/u-root -o initramfs.cpio u-root/cmds/core/* runc/ ./containerd/cmd/containerd ./flannel ./coredns ./etcd/etcdctl
+(cd u-root && go mod tidy && env -u GOARCH -u GOOS go build)
 
+# Two components cannot be folded into the bb busybox because they re-exec
+# /proc/self/exe (or os.Executable()): under a multiplexer that resolves to the
+# bb binary itself, and bb dispatches on argv[0], so the child cannot find its
+# applet and dies.
+#   * containerd-shim-runc-v2 spawns its long-running daemon that way
+#   * runc spawns the container init that way (exec.Command(exePath, "init"))
+# Both are built as standalone binaries and added with -files.
+#
+# runc comes from a fork whose !cgo path does both cgo-only jobs in Go: it
+# creates the container namespaces with clone(2) instead of the C nsexec
+# constructor, and it compiles seccomp profiles to BPF instead of calling
+# libseccomp. So it builds with CGO_ENABLED=0 and still enforces seccomp. See
+# docs/nsenter-and-runc.md. User namespaces still need the staged unshare that
+# nsexec implements, and are not handled.
+mkdir -p build
+(cd containerd && CGO_ENABLED=0 env -u GOARCH -u GOOS go build \
+	-o ../build/containerd-shim-runc-v2 ./cmd/containerd-shim-runc-v2)
+(cd runc && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -o ../build/runc .)
+# kubelet is pure Go, but it is one large binary rather than a bb applet.
+# The version stamp keeps the apiserver skew check happy.
+(cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
+	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=v1.35.8" \
+	-o ../build/kubelet ./cmd/kubelet)
+# The node's own bring-up, cmd/uinit, is a bb applet rather than a -files binary.
+# It does not re-exec itself, so the applet-name problem that keeps runc and the
+# shim standalone does not apply to it, and it is a go.work member so that
+# u-root's single build can compile it. See the assemble list below.
+#
+# The CNI plugin set.
+#
+# loopback is required whichever CNI is chosen: the CRI synthesises a loopback
+# network of its own and invokes /opt/cni/bin/loopback for it.
+#
+# flannel is a meta-plugin. It reads the subnet flanneld allocated out of
+# /run/flannel/subnet.env and delegates the real work to bridge and host-local,
+# so all three have to be present for a pod to get an address.
+#
+# flannel is the default CNI, with Cilium evaluated in docs/cilium.md and run by
+# the same harness under K4S_CNI=cilium. flannel is here because it needs nothing
+# from the kernel that this one lacks.
+(cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/loopback ./plugins/main/loopback)
+(cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/bridge ./plugins/main/bridge)
+(cd cni-plugins && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/host-local ./plugins/ipam/host-local)
+(cd flannel-cni-plugin && GOWORK=off CGO_ENABLED=0 env -u GOARCH -u GOOS \
+	go build -o ../build/cni-flannel .)
+
+# --- assemble ---------------------------------------------------------------
+# Node configuration that is not a secret. The kubelet kubeconfig is NOT here:
+# it is issued by the cluster and spliced in by scripts/test-cluster.sh.
+# The CA bundle is required for HTTPS image pulls; u-root ships no trust store.
+CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
+# u-root/cmds/core/* is the base applet set. The rest are separate projects that
+# are go.work members, which is what lets this one build compile them: u-root
+# makes one binary and dispatches on argv[0], and a package outside the workspace
+# cannot take part in that build. ./cmd/uinit is the node's bring-up, and u-root's
+# init runs it from /bbin/uinit. It reads its role from /etc/k4s/role, which is
+# installed just above -- the two roles have to be one package because u-root
+# builds bb with GO111MODULE=off and links only the packages named here, so an
+# applet cannot import a sibling package. runc exec's namespace staging is not
+# here: it is a subcommand of the runc binary itself (runc/libcontainer/
+# runcns_linux.go), so there is no second helper to package.
+./u-root/u-root -o initramfs.cpio \
+	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \
+	-files build/runc:bin/runc \
+	-files build/kubelet:bin/kubelet \
+	-files "$CA_BUNDLE":etc/ssl/certs/ca-certificates.crt \
+	-files configs/node/kubelet.yaml:etc/kubernetes/kubelet.yaml \
+	-files configs/node/role:etc/k4s/role \
+	-files configs/node/passwd:etc/passwd \
+	-files configs/node/group:etc/group \
+	-files configs/node/hosts:etc/hosts \
+	-files build/loopback:opt/cni/bin/loopback \
+	-files build/bridge:opt/cni/bin/bridge \
+	-files build/host-local:opt/cni/bin/host-local \
+	-files build/cni-flannel:opt/cni/bin/flannel \
+	-files configs/node/10-flannel.conflist:etc/cni/net.d/10-flannel.conflist \
+	-files configs/node/flannel-net-conf.json:etc/kube-flannel/net-conf.json \
+	u-root/cmds/core/* \
+	./containerd/cmd/containerd \
+	./containerd/cmd/ctr \
+	./flannel \
+	./coredns \
+	./etcd/etcdctl \
+	./cmd/uinit
