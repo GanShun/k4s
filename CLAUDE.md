@@ -364,7 +364,10 @@ Success for `make test` is the guest's own output: `K4S_CHECK_START`, no
   library. The correct isolation is separate processes — which is exactly what
   was done for runc — not a shared-process flag swap.
 - kubelet is ~83 MiB stripped, which is a different size class from u-root's
-  small-flash budget. Fine for netboot into server RAM.
+  small-flash budget. Fine for netboot into server RAM. It is the one binary built
+  with `-s -w`, against the general "don't strip while debugging" preference:
+  kubelet is where stripping buys the most and costs the most debuggability, and
+  both directions of that were considered. Don't change it without deciding again.
 
 ## Status
 

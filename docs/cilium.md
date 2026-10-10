@@ -260,11 +260,21 @@ Cilium's datapath:
 
    Its only purpose is deleting leftovers from the **AWS VPC CNI plugin**, which
    this node has never run; on any non-AWS node it is a no-op. It fails here
-   anyway, because it opens with `iptables-save | grep -c` under `set -o errexit`
-   and this node has no iptables at all — the pipeline fails, `errexit` fires,
-   the hook exits non-zero, and **a failed `postStart` hook makes the kubelet kill
-   the container**. Hence exit 2 and an empty log while the binary itself runs
-   fine by hand. The harness drops the hook when it renders the chart.
+   anyway. Note what the failure is *not*: the agent image does carry its own
+   `iptables` — the binary is present and the kernel is what refuses it, as item 8
+   below records. This node has the **nftables** tables and not the legacy ones
+   that `iptables` needs, so `iptables-save` fails, `errexit` fires, the hook exits
+   non-zero, and **a failed `postStart` hook makes the kubelet kill the
+   container**. Hence exit 2 and an empty log while the binary itself runs fine by
+   hand. The harness drops the hook when it renders the chart; `preStop` fails for
+   the same reason and goes with it. Verified by leaving both in
+   (`K4S_CILIUM_STRIP_HOOK=0`): `Warning FailedPostStartHook`, `Warning
+   FailedPreStopHook`, CrashLoopBackOff.
+
+   This is also the one place where the kernel fragment buys Cilium a working
+   agent rather than a stripped one: `IP_NF_IPTABLES_LEGACY` and
+   `NETFILTER_XTABLES_LEGACY` are what turn `iptables-save` from a failure into a
+   no-op here, and they are not in `configs/k4s-cni.config` today. See item 8.
 
 5. **The kernel has no XFRM, and `netlink.NewHandle` insists on it.** With the
    hook gone the agent ran, logged, did real work — envoy, endpoint manager,
