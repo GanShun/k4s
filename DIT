@@ -142,10 +142,6 @@ mkdir -p build
 # shim standalone does not apply to it, and it is a go.work member so that
 # u-root's single build can compile it. See the assemble list below.
 #
-# cmd/runc-ns is a bb applet for the same reason, and is the one helper that
-# exists because a namespace cannot be joined by exec. It is not a -files binary
-# because it never re-execs /proc/self/exe: it execs runc, by the path runc hands
-# it. See docs/runc-exec.md.
 # The CNI plugin set.
 #
 # loopback is required whichever CNI is chosen: the CRI synthesises a loopback
@@ -179,8 +175,9 @@ CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 # init runs it from /bbin/uinit. It reads its role from /etc/k4s/role, which is
 # installed just above -- the two roles have to be one package because u-root
 # builds bb with GO111MODULE=off and links only the packages named here, so an
-# applet cannot import a sibling package. ./cmd/runc-ns is the other applet of
-# this repository's own: runc exec's staging helper, which runc finds on PATH.
+# applet cannot import a sibling package. runc exec's namespace staging is not
+# here: it is a subcommand of the runc binary itself (runc/libcontainer/
+# runcns_linux.go), so there is no second helper to package.
 ./u-root/u-root -o initramfs.cpio \
 	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \
 	-files build/runc:bin/runc \
@@ -203,5 +200,4 @@ CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 	./flannel \
 	./coredns \
 	./etcd/etcdctl \
-	./cmd/uinit \
-	./cmd/runc-ns
+	./cmd/uinit

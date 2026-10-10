@@ -21,12 +21,15 @@ The fork is only half-ported: `initProcess.start()` got a `puregoNamespaces`
 branch, and `setnsProcess.start()` did not.
 
 **Status: fixed, and verified in the guest.** Section 6 is the implementation
-that makes `exec` work (`cmd/runc-ns` plus changes in `runc/libcontainer/`);
-sections 1–5 are kept as the study that found the failure, and read in the
-present tense of when they were written. Two defects the study did not find (the
-mount-namespace join and the namespace-fd open order) are also in §6, and a
-review of the fix found more (an unadopted process leaked on a report error,
-and the `CLONE_PIDFD` claim in §6 corrected below); those are fixed too.
+that makes `exec` work (the fork's `runcns` subcommand plus changes in
+`runc/libcontainer/`); sections 1–5 are kept as the study that found the
+failure, and read in the present tense of when they were written. Two defects the
+study did not find (the mount-namespace join and the namespace-fd open order)
+are also in §6, and a review of the fix found more (an unadopted process leaked
+on a report error, and the `CLONE_PIDFD` claim in §6 corrected below); those are
+fixed too. The staging used to be a separate `runc-ns` helper binary in *this*
+repository, packaged as a `bb` applet; §6 records why it moved into the fork and
+became a subcommand.
 
 ---
 
@@ -631,7 +634,7 @@ it is fully set up) add a constraint beyond the PID namespace.
 
 ---
 
-## 6. Implemented: option (a2), the `runc-ns` helper
+## 6. Implemented: option (a2), the fork's `runcns` subcommand
 
 This is what was built, and it is the study's (a2) with the wait model from the
 study's step 1 and three corrections the option sketch did not contain: the
@@ -648,7 +651,7 @@ process is the next stage** — which is nsexec's stage 1 and stage 2 with an
 `execve` where nsexec has its second, raw fork.
 
     runc exec
-      └─ runc-ns <pid-ns-path> <runc> <runc-argv0> init   (direct child)
+      └─ runc runcns <pid-ns-path> <runc> <runc-argv0> init   (direct child)
            ├─ setns(CLONE_NEWPID, <pid-ns-path>)  -- arms pid_ns_for_children
            ├─ clone+execve  -->  runc init        (runc's child, container pidns;
            │                                        argv[0] is <runc-argv0>)
@@ -657,66 +660,75 @@ process is the next stage** — which is nsexec's stage 1 and stage 2 with an
 
     runc exec (parent)
       ├─ reads the pid from the report pipe
-      ├─ reaps runc-ns
+      ├─ reaps the runcns stage
       └─ adopts the pid: p.cmd.Process = FindProcess(pid), p.process.ops = p
 
 Three pieces:
 
-1. **`cmd/runc-ns/main.go`** — the helper, `CGO_ENABLED=0`, in this repository
-   and not in the pinned u-root checkout. `run()` (main.go:72) locks the OS
-   thread and does the `setns` (main.go:101); `startStage()` (main.go:111) starts
-   the next stage with `SysProcAttr.Cloneflags = CLONE_PARENT` (main.go:145) and
-   writes `cmd.Process.Pid` to the descriptor named by
-   `_LIBCONTAINER_RUNCNS_PIDFD`. It hands the child `argv[1:]` as its argv
-   (main.go:133), whose argv[0] is the runc argv[0] passed in — not the
-   descriptor path it execs.
+1. **`libcontainer/runcns_linux.go`**, in the fork — the stage itself,
+   `CGO_ENABLED=0`, a subcommand of the `runc` binary rather than a second
+   binary. `runRuncNs` (`:118` locks the OS thread, `:124` does the `setns`);
+   `startExecNsStage` (`:134`) starts the next stage with
+   `SysProcAttr.Cloneflags = CLONE_PARENT` (`:167`) and writes
+   `cmd.Process.Pid` to the descriptor named by `runcNsReportFdEnv` (`:180`).
+   It hands the child `argv[1:]` as its argv, whose argv[0] is the runc argv[0]
+   passed in — not the descriptor path it execs. `RunRuncNs` (`:46`) is the
+   entry point, and it never returns, like `Init`.
 
 2. **The runc fork**, `libcontainer/`:
 
-   - `purego_nocgo.go:80` `stageExecNs` rewrites the exec command: it takes the
-     PID path out of the init stage's namespace list, finds the helper on PATH
-     (`findRuncNs`, `:144`, `RUNC_NS` overrides), appends one report pipe to
-     `cmd.ExtraFiles`, invokes the helper as
-     `runc-ns <pid-ns-path> <runc> <runc-argv0> init`, and returns the parent end
-     of the pipe. `purego_cgo.go` has the no-op version, so the cgo path is
-     untouched.
+   - `purego_nocgo.go:65` `stageExecNs` rewrites the exec command: it takes the
+     PID path out of the init stage's namespace list, appends one report pipe to
+     `cmd.ExtraFiles`, and invokes the stage as `os.Executable()` plus
+     `runcns <pid-ns-path> <runc> <runc-argv0> init` (`:74`, `:87`, `:103`),
+     returning the parent end of the pipe. `purego_cgo.go` has the no-op
+     version, so the cgo path is untouched.
    - `container_linux.go:732` calls it from `newSetnsProcess`, and
      `container_linux.go:572` is the fix for defect C. The netlink bootstrap
      payload is now built only under cgo (`:671`, `:717`), because nothing reads
      it without the C constructor.
    - `process_linux.go:630` `execSetns` branches: with a report pipe it calls
-     `adoptRuncNsChild` (`:688`), which replaces the study's
+     `adoptRuncNsChild` (`:689`), which replaces the study's
      "wait for the direct child, then decode stage1/stage2 JSON" (`:598-628`
      before the change) with a read of the reported pid; with no report pipe in
      the `!cgo` build it takes `p.cmd.Process.Pid` as `initProcess.start`
      already did; otherwise it is the cgo path, unchanged.
    - `process_linux.go:513` is the fix for defect A.
    - `join_namespaces_nocgo.go:69` `joinNamespaces` now opens every namespace
-     fd before joining any (`:80`), and calls `detachFs` (`:148`) before a mount
-     join. Its PID-path branch (`:95`) still skips rather than refuses, but now
-     says why, and points at the helper.
+     fd before joining any (`:112`, `:115`), and calls `detachFs` (`:148`) before
+     a mount join. Its PID-path branch (`:95`) still skips rather than refuses,
+     but now says why, and points at the stage.
 
-3. **Packaging**: `go.work` lists `./cmd/runc-ns`; `DIT` passes `./cmd/runc-ns`
-   to `u-root`, so it lands in the image as a bb applet at `/bbin/runc-ns` and
-   is found on the `PATH` that u-root's init sets (`pkg/libinit/root_linux.go`
-   puts `/bbin` in it, so `runc` finds it from containerd with no extra
-   configuration). It is an applet rather than a `-files` binary because it
-   never re-execs `/proc/self/exe`: the binary it execs is one runc hands it.
+3. **Dispatch and packaging**: there is no separate binary to package. The stage
+   is dispatched before the CLI, next to `init` (`init.go:17`), so it is absent
+   from `runc --help`, takes no flags, and runs before `app.Before`. Nothing in
+   `go.work`, `DIT` or the image changes for it: it is inside `build/runc`,
+   which `DIT` already ships as a `-files` binary at `/bin/runc`.
+
+The stage used to be a helper binary in *this* repository — `cmd/runc-ns`,
+packaged as a `bb` applet at `/bbin/runc-ns`, found on `PATH`, with `RUNC_NS` as
+an override. **It was moved into the fork because the thing it stages is runc
+itself.** `runc init` is already a re-exec of `/proc/self/exe`, and nsexec lives
+inside the runc binary too, so a Go stage in the same binary is the closer
+analogue of both; the stage and the runc that invokes it can never be different
+versions; and the report-fd name went from two independent string literals, one
+per repository, to one definition. The `PATH` lookup and the `RUNC_NS` override
+are gone with it, so there is nothing to test for either.
 
 ### The correction: `CLONE_PARENT` is required
 
-The option sketch said "runc's direct child is now `runc-ns`, which exits
+The option sketch said "runc's direct child is now the staging process, which exits
 immediately, while the process runc actually needs a PID for is the
 grandchild". True, but it does not say how runc is to *reap* the grandchild, and
 without that `runc exec` does not work at all: `runc`'s non-detached path waits
 for the exec'd process to exit through a SIGCHLD loop that is a `wait4(-1)` over
 **its own children** (`signals.go`, `reap`), and reports the status of the pid
-it recorded in `forward`. A grandchild whose parent is `runc-ns` — which has
-exited — is reparented, is nobody's child of runc's, and would never be
+it recorded in `forward`. A grandchild whose parent is the `runcns` stage —
+which has exited — is reparented, is nobody's child of runc's, and would never be
 reported: `runc exec` would hang forever instead of exiting with the hook's
 status.
 
-So `runc-ns` starts the next stage with `CLONE_PARENT`, exactly as nsexec's
+So the stage starts the next stage with `CLONE_PARENT`, exactly as nsexec's
 `clone_parent()` does (`nsexec.c:322`, and the comment at `nsexec.c:930-935`
 explains that runc has to reap stage 1 *for* stage 0 because of it). The
 grandchild is then runc's own child: `p.cmd.Wait()` reaps it, `cmd.Wait()`
@@ -729,7 +741,7 @@ Two smaller consequences of the same fact, both good:
   `CAP_SYS_PTRACE`, so it would pass either way, but under `ptrace_scope=1` a
   non-descendant would not, and with `CLONE_PARENT` the grandchild is a direct
   descendant.
-- `runc-ns` must not `Wait()` for the grandchild: it is not its child any more.
+- The stage must not `Wait()` for the grandchild: it is not its child any more.
   It writes the pid and exits, and the zombie is runc's to collect.
 
 ### A fourth defect the study did not find: joining a mount namespace from Go
@@ -827,10 +839,10 @@ the user/PID policy) first, then joins them. This is exactly the kind of thing
 the single file's worth of Go that did not reproduce nsexec left out, and it
 only shows up on the one path that joins a mount namespace.
 
-### A and C are still needed; B is replaced; the helper subsumes neither
+### A and C are still needed; B is replaced; the stage subsumes neither
 
-**A — the netlink bootstrap copy — is still required**, and the helper does not
-subsume it. A is about what the *parent* writes on the init pipe. `runc-ns`
+**A — the netlink bootstrap copy — is still required**, and the stage does not
+subsume it. A is about what the *parent* writes on the init pipe. The stage
 does not read that pipe; it passes it through untouched, so `runc init` still
 reads it directly, and the bootstrap message still has to not be written.
 `process_linux.go:513` now guards the copy with `!puregoNamespaces`, following
@@ -838,17 +850,17 @@ reads it directly, and the bootstrap message still has to not be written.
 
 **C — `setCloneFlags` on an exec child — is still required**, and is in fact
 more visible now. `container_linux.go:572` only calls it when `p.Init`. If it
-were left unguarded, the direct child would be `runc-ns` cloned into a *fresh*
-PID namespace and a fresh set of every other namespace (in the cgo build
-`setCloneFlags` is a no-op, which is why this never showed): `runc-ns` would
+were left unguarded, the direct child would be the `runcns` stage cloned into a
+*fresh* PID namespace and a fresh set of every other namespace (in the cgo build
+`setCloneFlags` is a no-op, which is why this never showed): it would
 then be PID 1 of a namespace of its own, and its `setns` into the container's
 would fail with `EINVAL` from `pidns_install`, because the container's namespace
 is not a descendant of its own. It is not merely wrong, it stops the mechanism
 dead.
 
 **B — `execSetns`'s wait-for-the-direct-child-then-decode-JSON — is replaced,
-not fixed.** The helper reports one integer on a pipe of its own, so both halves
-of the cgo model go away: there is no stage 0 to wait for (the helper is reaped
+not fixed.** The stage reports one integer on a pipe of its own, so both halves
+of the cgo model go away: there is no stage 0 to wait for (the stage is reaped
 explicitly in `adoptRuncNsChild` so the wait that follows is aimed at the right
 process) and no `{"stage1_pid":…,"stage2_pid":…}` to decode. Writing that JSON
 on the *init* pipe was considered and rejected: in the cgo build the parent
@@ -874,13 +886,13 @@ failed outright, kubelet killed the container, and the pod crash-looped.
 
 Two intermediate runs are what got there, and both are useful as evidence:
 
-- With A, B and C fixed and the helper staged exactly as described above, the
+- With A, B and C fixed and the stage written exactly as described above, the
 exec reached `runc init`'s `joinNamespaces` and failed on the **mount** setns
-with `EINVAL`. That verified the whole helper mechanism — the helper was found
-on PATH, resolved the PID path, armed `pid_ns_for_children`, started `runc init`
-as runc's own child, reported its host pid, the parent adopted it and wrote the
-initConfig, and `runc init` read it and began joining namespaces — and left
-only namespace joining wrong.
+with `EINVAL`. That verified the whole staging mechanism — the PID path was
+resolved, `pid_ns_for_children` armed, `runc init` started as runc's own child,
+its host pid reported, the parent adopted it and wrote the initConfig, and
+`runc init` read it and began joining namespaces — and left only namespace
+joining wrong.
 - With that fixed, the mount join succeeded and the **cgroup** open failed with
 `ENOENT`, which is the open-order defect above.
 
@@ -900,7 +912,7 @@ directly:
   passed a pipe as `ExtraFiles` (fd 3, named by an environment variable, exactly
   as `_LIBCONTAINER_INITPIPE` names it) and an intermediate process that listed
   nothing of its own had both the middle and the final process write to fd 3
-  successfully. That is what makes "no fd re-plumbing" in the helper true rather
+  successfully. That is what makes "no fd re-plumbing" in the stage true rather
   than hopeful; Go's `forkAndExecInChild1` only shuffles the fds it is given and
   leaves higher ones to `close-on-exec`, which `ExtraFiles` clears.
 - **The kernel's rules**, in the pinned checkout: `pidns_install`
@@ -913,11 +925,19 @@ directly:
   no `CLONE_NEW*` flag is, which is exactly the clone `os/exec` performs, so the
   child is created in the armed namespace.
 
-**By building:** `CGO_ENABLED=0` and `CGO_ENABLED=1` builds of the fork,
-`go vet` for both, and `make image` with `cmd/runc-ns` in the applet list — the
-bb build copies `golang.org/x/sys/unix`, which the helper needs for `setns(2)`,
-out of the module cache into its synthetic GOPATH. The image's `/bbin/runc-ns`
-is a symlink to `bb`, like `/bbin/uinit`.
+**By building and testing:** `CGO_ENABLED=0` and `CGO_ENABLED=1` builds of the
+fork and `go vet` for both — the `runcns` subcommand is present in both, though
+only the `!cgo` build stages an exec through it. (`go vet ./...` under
+`CGO_ENABLED=0` fails in `libcontainer/nsenter/test`, whose `escape.go` imports
+`"C"`; that is upstream and predates this work.) And `make image`, which no
+longer builds or packages a `bb` applet for the stage: it is inside `build/runc`,
+and `cpio -itv < initramfs.cpio` has no `runc-ns` entry.
+`libcontainer/purego_nocgo_test.go` runs under `CGO_ENABLED=0` and needs no root:
+it covers the argument, descriptor and report-pipe conventions, and, added when
+the stage moved into the fork, the exec half of it — that the child is started
+with the caller's argv0 rather than the path it was exec'd from, and that
+`CLONE_PARENT` makes it the caller's *parent's* child, which is the property the
+reap depends on. It does not perform a real setns.
 
 ### What is still not covered, and what is most likely to be wrong
 
@@ -925,28 +945,38 @@ is a symlink to `bb`, like `/bbin/uinit`.
   That covers the hook case, which is the point, but not: a nonzero exit status
   coming back out of `runc exec` (the hook exits 0; the *wait* is exercised,
   because kubelet would have hung otherwise, but status propagation of a
-  non-zero code is not), `--detach`, `--preserve-fds`, a console socket
-  (`kubectl exec -it`), or `RUNC_NS`.
+  non-zero code is not), `--detach`, `--preserve-fds`, or a console socket
+  (`kubectl exec -it`).
 - **The no-PID-namespace branch has not been run.** A container whose config has
-  no PID namespace skips the helper entirely and takes the direct-child model; a
+  no PID namespace skips the stage entirely and takes the direct-child model; a
   CRI container always has one, so this is the hand-written-bundle case.
 - **The `ParentDeathSignal` divergence.** `cmd.SysProcAttr.Pdeathsig` is still
-  set on the direct child, which is now the helper: it would be delivered to a
-  process that exits immediately, and it is cleared for children by
+  set on the direct child, which is now the `runcns` stage: it would be delivered
+  to a process that exits immediately, and it is cleared for children by
   `copy_process`, so an exec runs without it. This is invisible for CRI
   containers (containerd does not set it), but it is a real divergence if
   anything ever does.
 - **`setsid` is still not called**, which the study already noted is a
   pre-existing divergence from nsexec stage 2 rather than part of this work.
-- **User namespaces are still refused**, by `joinNamespaces`, and the helper
+- **User namespaces are still refused**, by `joinNamespaces`, and the stage
   does not change that.
-- **The review fixes have a fork-side unit test, but it is not the guest.**
-  `libcontainer/purego_nocgo_test.go` covers the helper wiring and the leak fixed
+- **The review fixes have fork-side unit tests, but they are not the guest.**
+  `libcontainer/purego_nocgo_test.go` covers the stage wiring and the leak fixed
   after review — a report `adoptRuncNsChild` cannot adopt must kill the process
-  the helper created. The `Wait()`-failure arm of the same leak is covered by the
+  the stage created. The `Wait()`-failure arm of the same leak is covered by the
   same deferred kill but is not separately provoked, and the test does not perform
   a real setns. The in-guest evidence remains the hook pod above.
-- The most likely thing still to be wrong is one of those exec shapes: `runc-ns`
+- **The stage is located with `os.Executable()`, which is inferred to have one
+  gap.** It is `readlink /proc/self/exe`, so it is absolute and never goes
+  through `PATH`, which is the point. But if runc is itself already running from
+  a cloned binary (`exeseal.IsSelfExeCloned()`), `/proc/self/exe` is a
+  `memfd:` link and `os.Executable()` names something that cannot be exec'd;
+  `newParentProcess` handles exactly that case for `runc init` by using
+  `/proc/self/exe` directly. It is not reachable from `runc exec` as containerd
+  invokes it (the on-disk binary), so it has not been exercised, and it has not
+  been reproduced: the gap is read out of Go's `os.Executable` and the memfd
+  semantics, not observed.
+- The most likely thing still to be wrong is one of those exec shapes: the stage
   passes the console socket and any preserved descriptors through by
   inheritance, which the host experiment says works, but nothing has actually
   run an exec that has one. After that, `detachFs` is the change with the widest

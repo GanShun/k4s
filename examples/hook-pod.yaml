@@ -1,8 +1,9 @@
 # The regression test for `runc exec`.
 #
-# A container lifecycle hook is a `runc exec`, and until cmd/runc-ns existed no
-# hook could run on this node: the exec failed with a bare exit status 255. See
-# docs/runc-exec.md. This pod is the smallest thing that fails without the fix
+# A container lifecycle hook is a `runc exec`, and until runc could stage one
+# into the container's PID namespace no hook could run on this node: the exec
+# failed with a bare exit status 255. See docs/runc-exec.md. This pod is the
+# smallest thing that fails without the fix
 # and passes with it, and it is deliberately about the runtime rather than
 # about the network -- hostNetwork, like smoke-pod.yaml, so a broken CNI cannot
 # be mistaken for a broken exec.

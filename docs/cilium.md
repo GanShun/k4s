@@ -293,7 +293,8 @@ Cilium's datapath:
    was making `runc exec` work, which is a fork limitation this project already knew
    about and had not connected to anything.
 
-   **Later:** `runc exec` was fixed (`docs/runc-exec.md`, `cmd/runc-ns`), and
+   **Later:** `runc exec` was fixed (`docs/runc-exec.md`; the staging is the runc
+   fork's internal `runcns` subcommand), and
    `examples/hook-pod.yaml` asserts that a `postStart` hook runs in the container's
    own PID namespace. **The strip is gone**: `run_cilium` no longer edits the
    rendered manifest and there is no `K4S_CILIUM_STRIP_HOOK` knob. A run with the

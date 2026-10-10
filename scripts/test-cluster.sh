@@ -18,7 +18,7 @@
 #      scheduler are exercised rather than just present
 #   5d. apply a pod whose postStart hook is a `runc exec`, and check the hook ran
 #      in the container's own PID namespace -- the regression test for the exec
-#      staging in cmd/runc-ns
+#      staging in runc's `runcns` subcommand
 #   6. boot it again, unchanged, and check it rejoins and everything returns
 #
 # The control plane is a VM rather than host processes because a node should
@@ -429,9 +429,9 @@ build_cilium() {
 	# The agent's postStart and preStop hooks are deliberately left in the
 	# manifest. A lifecycle hook is a `runc exec` -- kubelet runs one through the
 	# CRI's ExecSync, which is the same runtime call -- and `runc exec` works: the
-	# PID namespace an exec needs is joined by cmd/runc-ns. This harness used to
-	# strip both hooks, with K4S_CILIUM_STRIP_HOOK as the escape hatch that proved
-	# the strip was hiding a broken exec; the fix landed and both went away. See
+	# PID namespace an exec needs is joined by runc's own `runcns` staging
+	# subcommand. This harness used to strip both hooks to hide a broken exec;
+	# the fix landed and the strip went away. See
 	# docs/runc-exec.md and examples/hook-pod.yaml, whose postStart is the same
 	# kind of exec in a form that asserts the namespace it lands in. A run with
 	# the hooks in place is the acceptance test for the fix, not a variant.
@@ -924,7 +924,8 @@ run_log_pod() {
 
 # The postStart hook pod. A lifecycle hook is a `runc exec` -- kubelet runs an
 # exec hook through the CRI's ExecSync, which is the same runtime call -- so this
-# is the end-to-end regression test for cmd/runc-ns. Without it the exec fails,
+# is the end-to-end regression test for runc's `runcns` staging subcommand.
+# Without it the exec fails,
 # kubelet kills the container, and it comes back and fails again; the pod can
 # still be caught in Running between attempts, so this wait is only here to stop
 # collect from racing a kubelet that has not started the pod yet. The verdict is
@@ -1052,7 +1053,7 @@ check_marker() {
 		printf '  init: %s\n  hook: %s\n' \
 			"$(cat "$m/init-ns")" "$(cat "$m/hook-ns")" >&2
 		echo "  cause: runc exec did not reach setns(CLONE_NEWPID) with a fork" >&2
-		echo "  after it; see docs/runc-exec.md and cmd/runc-ns" >&2
+		echo "  after it; see docs/runc-exec.md and runc's runcns subcommand" >&2
 		return 1
 	fi
 	echo "pod: ok (container wrote its marker)"

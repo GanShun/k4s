@@ -8,7 +8,6 @@ use (
 	./coredns
 	./etcd/etcdctl
 	./cmd/uinit
-	./cmd/runc-ns
 )
 
 replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20240318140521-94a12d6c2237

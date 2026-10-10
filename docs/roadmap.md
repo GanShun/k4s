@@ -372,6 +372,36 @@ handful of defects in the fix itself (an unadopted process leaked on a report
 error, a wrong kernel explanation in a comment, an upstream-neutrality
 violation, an untested protocol); all were fixed before this landed.
 
+### The exec PID-namespace stage belongs in runc, not in k4s (2026-10-10)
+
+`runc exec` works, and the staging that makes it work — `setns(CLONE_NEWPID)`,
+then a fork that re-execs so the new process is created in the container's PID
+namespace — started life here as `cmd/runc-ns`, a second Go binary packaged as a
+`bb` applet at `/bbin/runc-ns`. It is now a subcommand of the runc binary
+(`runcns`, dispatched before the CLI next to `init`), in the fork.
+
+The reason is the same one that puts nsexec and the `init` entry point inside the
+runc binary: the program the stage runs is runc itself, so the staging process and
+the runc it stages can never be different versions. Two consequences were the
+deciding ones:
+
+  * the report-fd protocol — the stage writes the created process's host pid to a
+    descriptor runc holds the read end of — had its descriptor name as an
+    independent string literal on each side, one per repository. Renaming one
+    without the other is a silent protocol break, and nothing tied the two
+    together. There is now one definition.
+  * `runc-ns` was found with a `PATH` lookup, with `RUNC_NS` as an override. Both
+    are gone with the separate binary, so there is nothing to test.
+
+This is a *packaging* decision, not a mechanism one: `runtime.LockOSThread`,
+`setns(CLONE_NEWPID)`, `os/exec` as the fork with `CLONE_PARENT`, the report pipe
+and the parent's adoption of the reported pid are unchanged from the version the
+guest already verified. The k4s tree loses `cmd/runc-ns/` and its `go.work` line;
+`DIT` no longer passes it to `u-root`; and the image no longer carries
+`/bbin/runc-ns`. `examples/hook-pod.yaml` and the harness assertions stay, because
+they test behaviour, not where the stage lives. `docs/runc-exec.md` §6 has the
+design and the line pins.
+
 ### M2 — Ephemeral hygiene and the kill switch
 
 - tmpfs and eviction policy, log shipping, watchdog/EPO integration, and the

@@ -224,7 +224,8 @@ Verified on a node: the guest joins a throwaway apiserver and runs a pod with
   group is empty), and a PID namespace cannot be joined by `setns` alone: only
   the caller's *next child* is created in it, so it needs a fork. For a
   container init that namespace is created by `clone(2)` rather than joined. For
-  `runc exec` it is now joined by the fork `cmd/runc-ns` performs — see
+  `runc exec` the fork's internal `runcns` subcommand now performs that fork —
+  see
   `runc-exec.md` — and only a user namespace is still refused.
 - **`runc exec` works, and container lifecycle hooks with it.** This used to be
   the opposite: every exec failed with
@@ -242,12 +243,12 @@ Verified on a node: the guest joins a throwaway apiserver and runs a pod with
   build never creates. The PID namespace was a separate, later problem:
   `setns(CLONE_NEWPID)` only arms `pid_ns_for_children`, so joining one needs a
   fork, and a Go program cannot fork and keep running Go. It can fork and
-  re-exec, which is what `cmd/runc-ns` does. `docs/runc-exec.md` is the study of
+  re-exec, which is what the fork's `runcns` subcommand does. `docs/runc-exec.md` is the study of
   the failure and the write-up of the fix.
 - Checkpoint/restore (CRIU) and the mount-source remapping handshake remain
   untested.
 - `runc exec` in a container whose config has **no** PID namespace does not use
-  the helper at all — there is nothing to place the init stage in — and takes
+  the staging stage at all — there is nothing to place the init stage in — and takes
   the direct-child model instead, which is what `initProcess.start` has always
   done. A CRI container always has one (containerd's default Unix spec adds a
   PID namespace, and the CRI overrides it with a path only when the pod asks to
