@@ -86,8 +86,9 @@ Knobs the harnesses honour, all optional:
 | `K4S_CNI` | `flannel` | `cilium` picks the Cilium leg |
 | `K4S_NODE_MEM` | `1536` | node RAM in MiB; Cilium needs `6144` |
 | `K4S_BOOTS` | `2` | boots per cluster run |
-| `K4S_BOOT_TIMEOUT` | `180` | seconds `make test` allows the guest |
-| `K4S_SSH_PORT` | `2222` | host port forwarded to the node's sshd |
+| `K4S_BOOT_TIMEOUT` | `180` | seconds `make test` allows the guest, boot **and** check |
+| `K4S_SSH_PORT` | `2222` | host port forwarded to the **cluster** node's sshd |
+| `K4S_BOOT_SSH_PORT` | `2223` | the same for `make test` (separate, so the two can run at once) |
 | `K4S_XTRACE` | unset | trace the cluster harness to a file |
 | `K4S_CILIUM_VERSION` | `1.20.2` | Cilium chart version |
 
@@ -102,7 +103,8 @@ way to find a failure that arrives as a bare exit status: the harness's `ERR`
 trap does not fire for an explicit exit or a signal, and it has both.
 
 `/dev/kvm` decides the QEMU accelerator: KVM when writable, otherwise TCG
-(the scripts say so, and TCG is slow — raise `K4S_BOOT_TIMEOUT`).
+(the scripts say so, and TCG is slow — raise `K4S_BOOT_TIMEOUT`; the capability
+check gets that whole budget, not a fixed 8 seconds, because it runs a container).
 
 ## Commits
 
@@ -297,6 +299,10 @@ guest's TSC is skewed under KVM, the kernel marks it unstable partway through th
 boot, and the console wedges at that moment. Four consecutive runs failed that way
 before it was added. It is a property of the test VM, not of the node, which is
 why it lives in the harness and not in `configs/`.
+
+the check's lines complete commands (gosh reads its stdin a line at a time; the
+width rule went with the console). The prerequisite tools are **ssh**, **ssh-keygen** and
+**cpio** — cpio is what splices the throwaway key into the image.
 
 Success for `make test` is the guest's own output: `K4S_CHECK_START`, no
 `K4S_CHECK: ...: fail`, and `K4S_CONTAINER_OK` on a line of its own.

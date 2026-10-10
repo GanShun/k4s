@@ -17,7 +17,9 @@
 # Usage: test-boot.sh <kernel> <initramfs> [guest-script]
 #
 # Env: K4S_BOOT_TIMEOUT  seconds to wait for the guest (default 180)
-#      K4S_SSH_PORT      host port forwarded to the node's sshd (default 2222)
+#      K4S_BOOT_SSH_PORT host port forwarded to the node's sshd (default 2223)
+#
+# Needs ssh, ssh-keygen and cpio on the host. cpio is what splices the key in.
 
 set -Eeuo pipefail
 
@@ -32,11 +34,13 @@ IMAGE=${2:?usage: test-boot.sh <kernel> <initramfs> [guest-script]}
 CHECK=${3:-$(dirname "$0")/guest-check.sh}
 
 K4S_BOOT_TIMEOUT=${K4S_BOOT_TIMEOUT:-180}
-K4S_SSH_PORT=${K4S_SSH_PORT:-2222}
+# Not K4S_SSH_PORT: the cluster harness owns that name and its default, and the two
+# harnesses would otherwise collide if anyone ever ran them concurrently.
+K4S_BOOT_SSH_PORT=${K4S_BOOT_SSH_PORT:-2223}
 
 LOG=$(mktemp -t k4s-boot.XXXXXX.log)
 WORK=$(mktemp -d -t k4s-boot.XXXXXX)
-trap 'echo "guest log: $LOG"' EXIT
+trap 'rm -rf "$WORK"; echo "guest log: $LOG"' EXIT
 
 ACCEL=()
 if [ -w /dev/kvm ]; then
@@ -77,7 +81,7 @@ echo "booting $KERNEL with $IMAGE (timeout ${K4S_BOOT_TIMEOUT}s)"
 rc=0
 timeout "$K4S_BOOT_TIMEOUT" qemu-system-x86_64 \
 	-M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
-	-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$K4S_SSH_PORT-:2022 \
+	-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$K4S_BOOT_SSH_PORT-:2022 \
 	-device virtio-net-pci,netdev=n0 \
 	-kernel "$KERNEL" -initrd "$WORK/initramfs.cpio" \
 	-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all tsc=unstable" \
@@ -92,14 +96,18 @@ qpid=$!
 # networking accepts the connection before anything is listening -- and then ssh
 # waits for a banner that never comes. ConnectTimeout, not a longer sleep, is what
 # handles that.
+#
+# The timeout is an argument, not a constant: the readiness probe wants seconds,
+# and the check below runs a container and wants the whole boot budget. Hard-coding
+# it here is what made raising K4S_BOOT_TIMEOUT silently useless.
 ssh_do() {
-	timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
+	timeout "$1" ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
 		-o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-		-i "$WORK/client" -p "$K4S_SSH_PORT" root@127.0.0.1 "$@"
+		-i "$WORK/client" -p "$K4S_BOOT_SSH_PORT" root@127.0.0.1 "${@:2}"
 }
 
 deadline=$((SECONDS + K4S_BOOT_TIMEOUT))
-until ssh_do true >/dev/null 2>&1; do
+until ssh_do 8 true >/dev/null 2>&1; do
 	if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$qpid" 2>/dev/null; then
 		[ "$rc" = 0 ] && rc=124
 		break
@@ -113,9 +121,9 @@ done
 # with no command of its own reads stdin as a script. `sh -s` looked right and is
 # not -- gosh has no -s, so it errored out and printed bb's applet list.
 #
-# gosh reads that script a line at a time, so lines still have to stay short
-# enough not to wrap; that is the one console-era constraint that survives.
-ssh_do '/bin/sh' < "$CHECK" > "$WORK/out" 2>&1 || rc=$?
+# Its own budget, not the probe's: this mounts filesystems, runs `ctr version` and
+# runs a container, and on TCG without /dev/kvm that is not an 8-second exercise.
+ssh_do "$K4S_BOOT_TIMEOUT" '/bin/sh' < "$CHECK" > "$WORK/out" 2>&1 || rc=$?
 
 kill "$qpid" 2>/dev/null || true
 wait "$qpid" 2>/dev/null || true

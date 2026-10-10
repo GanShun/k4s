@@ -1,12 +1,13 @@
 #!/bin/sh
 #
-# Capability check run inside the k4s image over ssh, as `sh -s` with this file
-# on stdin.
+# Capability check run inside the k4s image over ssh, as `/bin/sh` with this file
+# on stdin. (`sh -s` was what the harness sent first; gosh has no -s, so it errored
+# out and bb printed its applet list instead.)
 #
-# It is a normal shell script: it runs once, in one process, with real control
-# flow. It used to be fed to the serial console one line at a time, which meant
-# every line had to be a complete command and short enough not to wrap, because
-# the console drops characters under load.
+# **Every line has to be a complete command.** gosh reads its stdin a line at a
+# time, so no continuations and no multi-line if/for blocks. The *width* half of
+# the old rule is retired with the console -- that was the tty dropping characters
+# when handed a lot at once, and a pipe does not do that.
 #
 # uinit has already brought the image up by the time this runs: the network, the
 # cgroup2 hierarchy, the tmpfs mounts and containerd are all its work. This used
