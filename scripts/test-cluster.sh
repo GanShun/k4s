@@ -422,13 +422,24 @@ build_cilium() {
 		--set hubble.enabled=false --set hubble.relay.enabled=false \
 		--set hubble.ui.enabled=false > "$CILIUM_YAML"
 
-	# Drop the agent's postStart hook. Its only job is deleting iptables rules
-	# left behind by the AWS VPC CNI plugin, which this node has never run: on
-	# any non-AWS node it is a no-op. It fails here regardless, because it opens
-	# with `iptables-save | grep -c` under `set -o errexit` and this node has no
-	# iptables at all -- and a failed postStart hook makes the kubelet kill the
-	# container. That is what made the agent exit 2 with an empty log while the
-	# binary itself runs fine. See docs/cilium.md.
+	# Drop the agent's postStart hook, and its preStop hook with it.
+	#
+	# Both fail on this node. Verified, not assumed: with the hooks left in, the
+	# agent goes CrashLoopBackOff with `Warning FailedPostStartHook` and
+	# `Warning FailedPreStopHook` inside 40s, and the kubelet kills the container --
+	# which is the agent exiting 2 with an empty log while the binary itself runs
+	# fine. The postStart hook's own job, deleting iptables rules left behind by
+	# the AWS VPC CNI plugin, is a no-op on a non-AWS node; the failure is that it
+	# runs `iptables-save | grep -c` under `set -o errexit` and the agent image does
+	# not have what it needs.
+	#
+	# The tempting reading -- Cilium's image bundles iptables, so the hook should
+	# work and this strip is treating a cause that isn't there -- is what
+	# K4S_CILIUM_STRIP_HOOK=0 exists to test, and it is falsified. What is *not*
+	# established is which command is missing; preStop failing too means it is not
+	# just the VPC-CNI cleanup, so "no iptables" is a guess that this does not
+	# confirm.
+	if [ "${K4S_CILIUM_STRIP_HOOK:-1}" = 1 ]; then
 	python3 - "$CILIUM_YAML" <<-'PY'
 	import sys
 	path = sys.argv[1]
@@ -444,6 +455,7 @@ build_cilium() {
 	assert removed == 1, f"expected one postStart hook, removed {removed}"
 	open(path, "w").writelines(out)
 	PY
+	fi
 }
 
 # --- node image -------------------------------------------------------------
