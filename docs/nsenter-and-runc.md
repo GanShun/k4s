@@ -211,35 +211,48 @@ Verified on a node: the guest joins a throwaway apiserver and runs a pod with
   `startInitialization`, on the thread `Init` has locked. The kernel decides per
   type: network, ipc and uts — the three the CRI gives a pod container by path
   (`WithPodNamespaces` in containerd's `internal/cri/opts/spec_opts.go`) — have
-  no thread-group restriction, and neither do mount and cgroup. A user namespace
-  cannot be joined this way at all (`userns_install()` refuses unless the
-  caller's thread group is empty), and a PID namespace needs the fork nsexec
-  performs so that the child becomes PID 1. Those two are refused for a
-  container init; for `runc exec` the PID namespace is skipped with a warning.
-- **`runc exec` does not work at all, and this is now known rather than untested.**
-  `setnsProcess` joins every namespace it can, so an exec'd process should see the
-  container's network, ipc, uts and mount namespaces but not its processes. In
-  practice it fails before that, with the error the kubelet gets for any container
-  lifecycle hook:
+  no thread-group restriction, and cgroup has none either. Mount has one of its
+  own, and it is the reason `runc exec` needed a fourth fix: `mntns_install`
+  refuses when the caller's `fs_struct` is shared
+  (`fs/namespace.c:6496`, `fs->users != 1`), because a `setns` of a mount
+  namespace on its own rewrites the caller's own root and working directory
+  (`kernel/nsproxy.c:370`, `nsset->fs = me->fs`). Every thread of a Go process
+  shares one `fs_struct` — the runtime clones them with `CLONE_FS` — so
+  `joinNamespaces` calls `unshare(CLONE_FS)` first. `docs/runc-exec.md` has the
+  whole story. A user namespace cannot be
+  joined this way at all (`userns_install()` refuses unless the caller's thread
+  group is empty), and a PID namespace cannot be joined by `setns` alone: only
+  the caller's *next child* is created in it, so it needs a fork. For a
+  container init that namespace is created by `clone(2)` rather than joined. For
+  `runc exec` it is now joined by the fork `cmd/runc-ns` performs — see
+  `runc-exec.md` — and only a user namespace is still refused.
+- **`runc exec` works, and container lifecycle hooks with it.** This used to be
+  the opposite: every exec failed with
+  `error executing setns process: exit status 255`, so **no container
+  lifecycle hook could run on this node**, because `postStart` and `preStop`
+  are both `exec`s. That is why Cilium's agent has to have its hooks stripped
+  (see `cilium.md`), and it applied to any workload, not just Cilium.
 
-  ```
-  OCI runtime exec failed: exec failed: unable to start container process:
-  error executing setns process: exit status 255
-  ```
-
-  `setns` is invoked on the direct child, and a PID namespace needs the fork
-  `nsexec` performs -- the child has to become PID 1 -- so the refusal above
-  applies to `exec` too, not only to a container init. The consequence is larger
-  than it sounds: **no container lifecycle hook can run on this node**, because
-  `postStart` and `preStop` are both `exec`s. That is why Cilium's agent has to
-  have its hooks stripped (see `cilium.md`), and it applies to any workload, not
-  just Cilium.
+  The attribution in the previous version of this bullet was wrong: the 255 was
+  *not* the PID refusal. It came from three places where the exec path still
+  carried the cgo staging — the netlink bootstrap message copied onto the init
+  pipe that the child then read its config from, `setCloneFlags` applied to an
+  exec child so that it was cloned into brand-new namespaces instead of joining
+  the container's, and `execSetns` waiting for a stage-0 process that a `!cgo`
+  build never creates. The PID namespace was a separate, later problem:
+  `setns(CLONE_NEWPID)` only arms `pid_ns_for_children`, so joining one needs a
+  fork, and a Go program cannot fork and keep running Go. It can fork and
+  re-exec, which is what `cmd/runc-ns` does. `docs/runc-exec.md` is the study of
+  the failure and the write-up of the fix.
 - Checkpoint/restore (CRIU) and the mount-source remapping handshake remain
   untested.
-- Configurations that force a real `setns`/double-fork will need the PID
-  reporting built back. This is now the concrete shape of that work: `runc exec`
-  is the thing waiting on it, and container hooks are the thing that cannot work
-  without it.
+- `runc exec` in a container whose config has **no** PID namespace does not use
+  the helper at all — there is nothing to place the init stage in — and takes
+  the direct-child model instead, which is what `initProcess.start` has always
+  done. A CRI container always has one (containerd's default Unix spec adds a
+  PID namespace, and the CRI overrides it with a path only when the pod asks to
+  share one), so this is the hand-written-bundle case.
+  It is the one exec shape that has not been exercised in the guest.
 
 ## Related: cgroup v1 vs v2
 

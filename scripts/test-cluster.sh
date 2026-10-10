@@ -16,6 +16,9 @@
 #      gets an address from the CNI
 #   5c. apply a DaemonSet and a Deployment, so the controller-manager and the
 #      scheduler are exercised rather than just present
+#   5d. apply a pod whose postStart hook is a `runc exec`, and check the hook ran
+#      in the container's own PID namespace -- the regression test for the exec
+#      staging in cmd/runc-ns
 #   6. boot it again, unchanged, and check it rejoins and everything returns
 #
 # The control plane is a VM rather than host processes because a node should
@@ -85,6 +88,7 @@ NETNS_POD=$EXAMPLES/netns-pod.yaml
 NGINX_POD=$EXAMPLES/nginx-pod.yaml
 DS=$EXAMPLES/ds-pod.yaml
 LOGPOD=$EXAMPLES/log-pod.yaml
+HOOK_POD=$EXAMPLES/hook-pod.yaml
 FLANNEL_DS=$EXAMPLES/flannel-ds.yaml
 DEPLOY=$EXAMPLES/deploy-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
@@ -610,16 +614,24 @@ collect() {
 	# Cleared, not merely created: a marker left by an earlier run would otherwise
 	# let a check pass on evidence this run did not produce.
 	rm -f "$CP/markers"/*
-	for m in smoke netns ds deploy; do
+	for m in smoke netns ds deploy hook; do
 		case $m in
 			smoke)  want=K4S_POD_OK ;;
 			netns)  want=K4S_NETNS_OK ;;
 			ds)     want=K4S_DS_OK ;;
 			deploy) want=K4S_DEPLOY_OK ;;
+			hook)   want=K4S_HOOK_OK ;;
 		esac
 		wait_marker "/var/log/k4s-$m/result" "$CP/markers/$m" "$want"
 	done
 	wait_marker '/var/log/pods/*k4s-log*/log/*.log' "$CP/markers/log" K4S_LOG_OK
+	# The hook pod's own PID namespace, and the container init's, which
+	# check_marker compares: the hook is a `runc exec` and has to end up in the
+	# container's namespace for this to match. Waited for by their content, not
+	# by the file existing, because a hook that ran in the wrong namespace
+	# records the harness's error message here instead of an inode.
+	wait_marker '/var/log/k4s-hook/hook-ns' "$CP/markers/hook-ns" 'pid:\['
+	wait_marker '/var/log/k4s-hook/init-ns' "$CP/markers/init-ns" 'pid:\['
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
 	# over the pod network instead, which is also the assertion that the pod
@@ -654,10 +666,14 @@ diag() {
 	local d=$CP/diag m
 	mkdir -p "$d"
 	echo "  --- markers ---" >&2
-	for m in smoke netns ds deploy; do
+	for m in smoke netns ds deploy hook; do
 		printf '  %-7s %s\n' "$m" \
 			"$(guest_get "cat /var/log/k4s-$m/result 2>/dev/null" | tr '\n' ' ')" >&2
 	done
+	# The hook's namespace and the container init's are supposed to be the same
+	# one, so both are printed rather than just the difference.
+	printf '  hook ns  %s\n' "$(guest_get 'cat /var/log/k4s-hook/hook-ns 2>/dev/null' | tr '\n' ' ')" >&2
+	printf '  init ns  %s\n' "$(guest_get 'cat /var/log/k4s-hook/init-ns 2>/dev/null' | tr '\n' ' ')" >&2
 	echo "  --- is the node's containerd still alive? ---" >&2
 	guest_get 'ctr version' | sed 's/^/  /' >&2
 	guest_get 'ls -la /tmp' | sed 's/^/  /' >&2
@@ -932,6 +948,30 @@ run_log_pod() {
 	return 1
 }
 
+# The postStart hook pod. A lifecycle hook is a `runc exec` -- kubelet runs an
+# exec hook through the CRI's ExecSync, which is the same runtime call -- so this
+# is the end-to-end regression test for cmd/runc-ns. Without it the exec fails,
+# kubelet kills the container, and it comes back and fails again; the pod can
+# still be caught in Running between attempts, so this wait is only here to stop
+# collect from racing a kubelet that has not started the pod yet. The verdict is
+# the marker check, and the namespace comparison in check_marker.
+run_hook() {
+	log "applying the pod whose postStart hook is a runc exec"
+	reapply "$HOOK_POD"
+	local i ph
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-hook -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			echo "hook pod phase: Running"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "hook pod: did not reach Running" >&2
+	K describe pod k4s-hook 2>&1 | tail -20 | sed 's/^/  /' >&2
+	return 1
+}
+
 # The DaemonSet controller and the scheduler both live in the control plane VM,
 # so these only become ready if it is doing its job: the DaemonSet controller
 # assigns its own node, and nothing pins the Deployment, so it needs the
@@ -1011,12 +1051,43 @@ check_marker() {
 		sed 's/^/  /' "$m/log" >&2
 		return 1
 	fi
+	# The lifecycle hook. Two things are asserted, and the second is what makes
+	# this about the exec being staged rather than merely about it starting: the
+	# hook ran at all, and it ran in the same PID namespace as the container's
+	# own init. A hook left in the host's PID namespace would read a different
+	# inode here, or nothing at all -- the container's /proc is a procfs mount
+	# for that namespace, and a process outside it is not visible in it.
+	if ! grep -q 'K4S_HOOK_OK' "$m/hook" 2>/dev/null; then
+		echo "hook: FAILED (the postStart hook did not run)" >&2
+		sed 's/^/  /' "$m/hook" 2>/dev/null >&2
+		echo "  a postStart hook is a runc exec; see docs/runc-exec.md" >&2
+		return 1
+	fi
+	if ! grep -q 'pid:\[' "$m/hook-ns" 2>/dev/null; then
+		echo "hook: FAILED (the hook could not read its own PID namespace)" >&2
+		sed 's/^/  /' "$m/hook-ns" 2>/dev/null >&2
+		return 1
+	fi
+	if ! grep -q 'pid:\[' "$m/init-ns" 2>/dev/null; then
+		echo "hook: FAILED (the container init could not read its PID namespace)" >&2
+		sed 's/^/  /' "$m/init-ns" 2>/dev/null >&2
+		return 1
+	fi
+	if [ "$(cat "$m/hook-ns")" != "$(cat "$m/init-ns")" ]; then
+		echo "hook: FAILED (the hook is not in the container's PID namespace)" >&2
+		printf '  init: %s\n  hook: %s\n' \
+			"$(cat "$m/init-ns")" "$(cat "$m/hook-ns")" >&2
+		echo "  cause: runc exec did not reach setns(CLONE_NEWPID) with a fork" >&2
+		echo "  after it; see docs/runc-exec.md and cmd/runc-ns" >&2
+		return 1
+	fi
 	echo "pod: ok (container wrote its marker)"
 	echo "seccomp: ok (container runs under a filter)"
 	echo "netns pod: ok (container has an address on eth0 from the CNI)"
 	echo "workloads: ok (both controller-created pods wrote their markers)"
 	echo "log pod: ok (the pod's stdout reached /var/log/pods)"
 	echo "nginx: ok (the node fetched stock nginx's page over the pod network)"
+	echo "hook: ok (postStart ran, in the container's PID namespace)"
 	return 0
 }
 
@@ -1070,6 +1141,7 @@ run_netns_pod
 run_nginx
 run_workloads
 run_log_pod
+run_hook
 collect
 stop_guest
 check_marker
@@ -1099,6 +1171,7 @@ for n in $(seq 2 "$BOOTS"); do
 	run_netns_pod
 	run_nginx
 	run_workloads
+	run_hook
 	collect
 	stop_guest
 	check_marker

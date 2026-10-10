@@ -117,7 +117,8 @@ func node() {
 		"/lib/modules", "/run/containerd", "/run/flannel",
 		"/var/lib/containerd", "/var/lib/kubelet", "/var/log/pods",
 		"/var/log/k4s-smoke", "/var/log/k4s-netns",
-		"/var/log/k4s-ds", "/var/log/k4s-deploy", "/var/log/k4s-flannel")
+		"/var/log/k4s-ds", "/var/log/k4s-deploy", "/var/log/k4s-flannel",
+		"/var/log/k4s-hook")
 
 	// Strict RAM-only: there is no disk, so everything the runtime and kubelet
 	// write is a tmpfs. A tmpfs defaults to half of RAM, which is what decides

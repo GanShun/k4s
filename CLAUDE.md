@@ -47,7 +47,7 @@ generates throwaway PKI, boots a **control plane VM** (etcd, apiserver,
 controller-manager, scheduler) and then the node twice (join, then
 reboot-and-rejoin). It prints `node: ok`, `flannel: ok` or `cilium: ok`,
 `pod: ok`, `seccomp: ok`, `netns pod: ok`, `log pod: ok`, `nginx: ok`,
-`daemonset: ok`, `deployment: ok`, `workloads: ok`, `cluster: ok`.
+`hook: ok`, `daemonset: ok`, `deployment: ok`, `workloads: ok`, `cluster: ok`.
 `K4S_BOOTS` (default 2) sets the number of boots. Both VMs are killed on exit.
 
 Every run is self-contained: it stops any control plane VM left by an earlier run
@@ -151,16 +151,18 @@ git for-each-ref --format='%(refname)' refs/original | xargs -r -n1 git update-r
 | `configs/k4s-tiny.config` | Kernel fragment appended over `tinyconfig` |
 | `configs/k4s-cni.config` | Second kernel fragment, also always applied: what Cilium needs |
 | `configs/node/` | The node's own definition, baked into the image by `DIT`: kubelet config, `role`, passwd/group/hosts, CNI conflists |
-| `examples/` | Workloads applied to a cluster afterwards — smoke/netns/log pods, DaemonSet, Deployment, nginx. Not baked in |
+| `examples/` | Workloads applied to a cluster afterwards — smoke/netns/log/hook pods, DaemonSet, Deployment, nginx. Not baked in |
 | `scripts/test-boot.sh` | QEMU boot + assert the guest checks |
 | `scripts/guest-check.sh` | The capability check, piped into the guest's gosh |
 | `scripts/test-cluster.sh` | M1 join test: a control plane VM + two node boots |
 | `cmd/uinit/` | Both bring-ups, in the image as a bb applet: the node's and the control plane's, chosen by `/etc/k4s/role` |
+| `cmd/runc-ns/` | The `runc exec` staging helper, in the image as a bb applet at `/bbin/runc-ns`: it joins a PID namespace, which `runc exec` cannot do by itself. See `docs/runc-exec.md` |
 | `scripts/clone-linux.sh` | Clones the pinned kernel checkout for `make linux` |
 | `docs/roadmap.md` | Milestones M0–M3 and the decisions log |
 | `docs/testing.md` | What the two tests are, how a cluster test runs, and what the
 harness cost to get working |
 | `docs/nsenter-and-runc.md` | Why runc normally needs cgo, and the fork |
+| `docs/runc-exec.md` | Why `runc exec` failed, and how `cmd/runc-ns` fixes it |
 | `docs/cilium.md` | Evaluating Cilium as the CNI: what the node lacks, and why the cost is mostly kernel |
 | `go.work` | Committed and load-bearing; see below |
 
@@ -212,13 +214,15 @@ version stamp (`k8s.io/component-base/version.gitVersion=v1.35.8`).
 
 **4. Assemble.** `./u-root/u-root` with `u-root/cmds/core/*`,
 `./containerd/cmd/containerd`, `./containerd/cmd/ctr`, `./flannel`,
-`./coredns`, `./etcd/etcdctl`, plus the `-files` inputs (seventeen of them: the
-node config, the CA bundle, uinit's role and the bundled CNI plugins).
+`./coredns`, `./etcd/etcdctl`, `./cmd/uinit` and `./cmd/runc-ns`, plus the
+`-files` inputs (seventeen of them: the node config, the CA bundle, uinit's role
+and the bundled CNI plugins).
 
 ### go.work is committed and load-bearing
 
 `go.work` lists the cloned modules (`./containerd`, `./flannel`, `./runc`,
-`./u-root`, `./coredns`, `./etcd/etcdctl`) and carries a
+`./u-root`, `./coredns`, `./etcd/etcdctl`) and this repository's two commands
+(`./cmd/uinit`, `./cmd/runc-ns`), and carries a
 dependency pin the build relies on. **Do not regenerate it and do not add
 `go work init`.** It is also why the repo has no broken-intermediate state that
 tries to regenerate it: the workspace is authoritative.
@@ -348,20 +352,33 @@ Success for `make test` is the guest's own output: `K4S_CHECK_START`, no
   comparisons; `TestSectionIsATree` measures that, because a chain would still be
   correct. Architectures x/sys/unix has no table for (x32, the mips n32 ABIs,
   31-bit s390) are refused rather than filtered. See `docs/nsenter-and-runc.md`.
-- **Joining a namespace by path works, with two exceptions.** The init process
+- **Joining a namespace by path works, with one exception.** The init process
   joins them itself, which is normally the C constructor's job; that covers the
   network, IPC and UTS namespaces a CRI pod container is given by path, and
-  `make test-cluster` asserts the container's own view of its interface. A user
-  namespace cannot be joined from a Go process at all, and a PID namespace needs
-  a fork Go cannot do, so both are refused. See `docs/nsenter-and-runc.md`.
+  `make test-cluster` asserts the container's own view of its interface. A mount
+  namespace additionally needs `unshare(CLONE_FS)` first, because the Go runtime
+  shares one `fs_struct` across its threads and `mntns_install` refuses a shared
+  one. A user
+  namespace cannot be joined from a Go process at all. A PID namespace needs a
+  fork (`setns` only arms `pid_ns_for_children`), which is what `cmd/runc-ns`
+  does for `runc exec`; a container init gets its own by `clone(2)` instead.
+  See `docs/nsenter-and-runc.md` and `docs/runc-exec.md`.
 - **Rootless / user namespaces**: not supported. `CLONE_NEWUSER` plus the other
   namespaces in one `clone` returns `EPERM`; nsexec's staged unshare is the
   missing piece. The node runs containers as root, so this does not block it.
-- **`runc exec` does not work**, and that has a visible consequence: `postStart` and
-  `preStop` are `exec`s, so **no container lifecycle hook can run on this node**.
-  It fails with `error executing setns process: exit status 255` — the PID-namespace
-  refusal above applies to `exec` too. This is why Cilium's agent hooks are
-  stripped. Checkpoint-restore and mount-source remapping remain untested.
+- **`runc exec` works, so container lifecycle hooks work.** `postStart` and
+  `preStop` are `exec`s, so this is what gives kubelet its hooks. It used to fail
+  with `error executing setns process: exit status 255`, which was three pieces of
+  leftover cgo staging rather than the PID-namespace refusal it looked like: the
+  netlink bootstrap message copied onto the init pipe, `setCloneFlags` applied to
+  an exec child, and `execSetns` waiting for a stage-0 process a `!cgo` build
+  never creates. The PID namespace is joined by `cmd/runc-ns`, a small Go helper
+  built into the image as a bb applet: it `setns`es, then starts `runc init` on
+  the same locked thread so the new process really is created in the container's
+  PID namespace, and reports the host pid back. `examples/hook-pod.yaml` is the
+  regression test. Cilium's agent hooks are still stripped by the harness — the
+  exec is no longer the reason, but nothing has re-tested what that hook needs
+  beyond it. Checkpoint-restore and mount-source remapping remain untested.
 - **gobusybox applet flag scoping**: deferred. A per-applet `flag.CommandLine`
   swap at runtime breaks `coredns`, which registers flags from its `coremain`
   library. The correct isolation is separate processes — which is exactly what
@@ -380,5 +397,8 @@ reboot)** are done: `make test` passes the capability check and runs a
 container, and `make test-cluster` joins, runs the smoke pod (asserting the
 container reports `Seccomp: 2`), reboots, rejoins and runs it again. The image
 uses a cgo-free runc fork that does both cgo-only jobs — namespaces and seccomp
-— in Go. `docs/roadmap.md` has the M1 findings; M2 (ephemeral hygiene, kill
-switch) and M3 (GPU) are next.
+— in Go, and `runc exec` works, so container lifecycle hooks do: the PID
+namespace an exec needs is joined by `cmd/runc-ns`, and
+`examples/hook-pod.yaml` asserts that a `postStart` hook runs inside the
+container's own PID namespace. `docs/roadmap.md` has the M1 findings; M2
+(ephemeral hygiene, kill switch) and M3 (GPU) are next.

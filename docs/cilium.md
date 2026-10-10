@@ -297,6 +297,15 @@ Cilium's datapath:
    both hooks when it renders the chart (`K4S_CILIUM_STRIP_HOOK=0` to leave them in
    and watch it fail).
 
+   **Later:** `runc exec` was fixed (`docs/runc-exec.md`, `cmd/runc-ns`), and
+   `examples/hook-pod.yaml` now asserts that a `postStart` hook runs in the
+   container's own PID namespace. The strip is still the default, and this
+   paragraph's diagnosis of *this* hook is still the last thing anyone measured:
+   the exec failing was the first blocker, and whether the hook's body would then
+   work — it runs `iptables-save`, which needs the agent image's own binary and a
+   mount that propagates, and it was never re-tested — is a separate question that
+   has not been reopened. `K4S_CILIUM_STRIP_HOOK=0` is how to reopen it.
+
 5. **The kernel has no XFRM, and `netlink.NewHandle` insists on it.** With the
    hook gone the agent ran, logged, did real work — envoy, endpoint manager,
    identity allocator — and then died with:

@@ -343,9 +343,9 @@ could reasonably tidy either one away.
     `kubelet.yaml`, `role`, `passwd`, `group`, `hosts`, `10-flannel.conflist`,
     `flannel-net-conf.json`.
   * `examples/` — workloads a harness applies to a cluster afterwards: the smoke,
-    netns and log pods, a DaemonSet, a Deployment, nginx. `flannel-ds.yaml` is here
-    too, which is why it was never in `DIT`'s `-files` list: the DaemonSet is
-    applied, not baked.
+    netns, log and hook pods, a DaemonSet, a Deployment, nginx. `flannel-ds.yaml`
+    is here too, which is why it was never in `DIT`'s `-files` list: the DaemonSet
+    is applied, not baked.
 
 The dividing line is "does `DIT` splice this into an image", and it is the line
 that makes the goal possible — somebody defining their own worker or controller
@@ -360,6 +360,12 @@ is known to carry its own — so the claim was made falsifiable and then tested.
 hooks fail, so the strip is load-bearing; but `preStop` has nothing to do with the
 AWS VPC CNI cleanup, so the *reason* was wrong. "No iptables" is now labelled a
 guess. A claim that can be tested should be, before it is written down as cause.
+
+Both hooks failing turned out to have a cause further down: `runc exec` was broken
+for three unrelated reasons, and the PID namespace was a fourth. That was found
+and fixed later (`docs/runc-exec.md`), and the hook pod in the cluster test now
+covers it; the strip itself was left as it was, because nothing has measured what
+this particular hook needs once the exec runs.
 
 ### M2 — Ephemeral hygiene and the kill switch
 
