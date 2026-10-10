@@ -56,9 +56,10 @@ also why it is quick — around 75 seconds for two boots with flannel, and aroun
 210 with Cilium, whose agent has to install itself first.
 
 `make test-cluster-cni` needs **helm** to render Cilium's chart (`HELM=...` to
-point at one that is not on `PATH`) and **python3**, which `build_cilium` uses to
-strip the chart's `postStart` hook. It also sets `K4S_NODE_MEM=6144`, which it
-must: see the knobs table below.
+point at one that is not on `PATH`). It also sets `K4S_NODE_MEM=6144`, which it
+must: see the knobs table below. Cilium's agent `postStart`/`preStop` hooks are
+left in the rendered manifest — they are `runc exec`s and `runc exec` works — so
+this run is also the acceptance test for that.
 
 The control plane is a VM rather than host processes because a node should join
 something shaped like a real cluster: the controller-manager assigns pod CIDRs,
@@ -376,9 +377,13 @@ Success for `make test` is the guest's own output: `K4S_CHECK_START`, no
   built into the image as a bb applet: it `setns`es, then starts `runc init` on
   the same locked thread so the new process really is created in the container's
   PID namespace, and reports the host pid back. `examples/hook-pod.yaml` is the
-  regression test. Cilium's agent hooks are still stripped by the harness — the
-  exec is no longer the reason, but nothing has re-tested what that hook needs
-  beyond it. Checkpoint-restore and mount-source remapping remain untested.
+  regression test, and Cilium's real agent hooks are now left in and pass — the
+  strip and its knob are gone. What is still **unrun**: `runc exec --detach`,
+  `--preserve-fds`, an exec with a console socket (`kubectl exec -it`), the
+  `RUNC_NS` helper override, and the branch where the container config has no PID
+  namespace at all (the helper is skipped and the direct child stays runc init).
+  Checkpoint-restore and mount-source remapping remain untested, and nsexec's
+  `setsid()` and its `ParentDeathSignal` handling are still divergence points.
 - **gobusybox applet flag scoping**: deferred. A per-applet `flag.CommandLine`
   swap at runtime breaks `coredns`, which registers flags from its `coremain`
   library. The correct isolation is separate processes — which is exactly what

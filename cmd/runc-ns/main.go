@@ -53,7 +53,10 @@ import (
 )
 
 // reportFdEnv names the descriptor the child's host PID is written to. It is
-// the write end of a pipe runc holds the read end of.
+// the write end of a pipe runc holds the read end of. It is an independent
+// string literal from runc's runcNsReportFdEnv, and nothing checks that the two
+// still agree: renaming one without the other makes runc read EOF and the exec
+// fail with no hint that the name is why.
 const reportFdEnv = "_LIBCONTAINER_RUNCNS_PIDFD"
 
 func main() {
@@ -63,11 +66,12 @@ func main() {
 	}
 }
 
-// run is: runc-ns <pid-namespace-path> <command> [args...], where <command> is
-// the runc binary and its first argument is "init".
+// run is: runc-ns <pid-namespace-path> <program> <argv0> [args...], where
+// <program> is the binary to place in the PID namespace -- runc, for an exec --
+// and <argv0> is the name that program should see as its own argv[0].
 func run() error {
-	if len(os.Args) < 3 {
-		return fmt.Errorf("usage: runc-ns <pid-namespace-path> <command> [args...]")
+	if len(os.Args) < 4 {
+		return fmt.Errorf("usage: runc-ns <pid-namespace-path> <program> <argv0> [args...]")
 	}
 	pidNsPath, argv := os.Args[1], os.Args[2:]
 
@@ -76,10 +80,18 @@ func run() error {
 		return fmt.Errorf("%s: %w", reportFdEnv, err)
 	}
 
-	// pid_ns_for_children lives in the nsproxy, which every thread of a process
-	// shares, so the setns has to happen on the thread whose clone(2) creates
-	// the child, and nothing may clone in between. That is why there is exactly
-	// one os/exec call below and no goroutine anywhere in this program.
+	// setns(CLONE_NEWPID) does not move this process. pidns_install()
+	// (kernel/pid_namespace.c:392) writes pid_ns_for_children in the fresh
+	// nsproxy prepare_nsset() allocated, and commit_nsset() installs that
+	// nsproxy on *the calling task only* (kernel/nsproxy.c:354-366, :565,
+	// switch_task_namespaces). So this thread -- and not the process -- is the
+	// only one with an armed pid_ns_for_children, and the clone(2) that creates
+	// the child has to come from it: os/exec performs that clone on the thread
+	// that calls Start. LockOSThread keeps this goroutine on that thread;
+	// without it the scheduler could move the goroutine after the setns and the
+	// clone would be made by a thread that never did it. Nothing may clone in
+	// between either, which is why there is exactly one os/exec call below and
+	// no goroutine anywhere in this program.
 	runtime.LockOSThread()
 
 	fd, err := unix.Open(pidNsPath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -113,8 +125,12 @@ func startStage(argv []string, reportFd int) error {
 		// deliberately skipped: the path is absolute, and when it names an
 		// O_PATH descriptor of a sealed memfd there is nothing useful for
 		// LookPath to check anyway.
-		Path:   argv[0],
-		Args:   argv,
+		Path: argv[0],
+		// argv[0] is the path and argv[1:] is the child's own argv, whose
+		// argv[0] is runc's own argv[0]. Keeping them apart is what lets the
+		// exec'd runc init see the same argv[0] a direct child of runc would;
+		// using argv here would replace it with the descriptor path.
+		Args:   argv[1:],
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,

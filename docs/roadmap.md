@@ -353,19 +353,24 @@ should be reading `configs/` for what a node *is*, and `examples/` for something
 run on one. `test-cluster.sh` keeps `$CONFIGS` for the spliced files and uses
 `$EXAMPLES` for the workloads, so the two meanings cannot drift back together.
 
-Related, from the same review: `K4S_CILIUM_STRIP_HOOK=0` leaves Cilium's agent
-`postStart` and `preStop` hooks in place. It exists because the strip's comment
+Related, from the same review: `K4S_CILIUM_STRIP_HOOK=0` left Cilium's agent
+`postStart` and `preStop` hooks in place. It existed because the strip's comment
 claimed the hook fails for want of an `iptables` binary, and Cilium's agent image
 is known to carry its own — so the claim was made falsifiable and then tested. Both
-hooks fail, so the strip is load-bearing; but `preStop` has nothing to do with the
-AWS VPC CNI cleanup, so the *reason* was wrong. "No iptables" is now labelled a
+hooks failed, so the strip was load-bearing; but `preStop` has nothing to do with
+the AWS VPC CNI cleanup, so the *reason* was wrong. "No iptables" is now labelled a
 guess. A claim that can be tested should be, before it is written down as cause.
 
 Both hooks failing turned out to have a cause further down: `runc exec` was broken
 for three unrelated reasons, and the PID namespace was a fourth. That was found
-and fixed later (`docs/runc-exec.md`), and the hook pod in the cluster test now
-covers it; the strip itself was left as it was, because nothing has measured what
-this particular hook needs once the exec runs.
+and fixed later (`docs/runc-exec.md`). The strip and its knob are now **gone**:
+`run_cilium` leaves the chart's hooks in the manifest, and
+`make test-cluster-cni` with no knob is the acceptance test — it passes with
+`cilium: ok` and `hook: ok` on both boots. So what this hook's body needs once
+the exec runs is no longer inferred: it works. A code review of the fix found a
+handful of defects in the fix itself (an unadopted process leaked on a report
+error, a wrong kernel explanation in a comment, an upstream-neutrality
+violation, an untested protocol); all were fixed before this landed.
 
 ### M2 — Ephemeral hygiene and the kill switch
 

@@ -20,6 +20,14 @@ each step, then prices the options for doing `exec` properly.
 The fork is only half-ported: `initProcess.start()` got a `puregoNamespaces`
 branch, and `setnsProcess.start()` did not.
 
+**Status: fixed, and verified in the guest.** Section 6 is the implementation
+that makes `exec` work (`cmd/runc-ns` plus changes in `runc/libcontainer/`);
+sections 1–5 are kept as the study that found the failure, and read in the
+present tense of when they were written. Two defects the study did not find (the
+mount-namespace join and the namespace-fd open order) are also in §6, and a
+review of the fix found more (an unadopted process leaked on a report error,
+and the `CLONE_PIDFD` claim in §6 corrected below); those are fixed too.
+
 ---
 
 ## 1. The exact failure path
@@ -523,10 +531,12 @@ unit tests (`ls libcontainer/*_test.go`) have no setns/exec coverage.
 The one nocgo precedent worth copying is the seccomp path:
 `libcontainer/seccomp/seccomp_nocgo_test.go` is `//go:build linux && !cgo` and
 re-execs the test binary as a helper so the filter is not installed in the test
-process. The same trick — a `!cgo` Go test that re-execs itself — is the natural
-way to test the exec staging without root: assert that the parent and child
-agree on the init-pipe protocol, and that a setns into a namespace whose path
-is the current process's own namespace succeeds.
+process. **That shape is what `libcontainer/purego_nocgo_test.go` uses**, and it
+needs no root: it covers the conventions the helper depends on — its argv layout
+(including that the exec'd init keeps runc's argv[0]), the init path and report
+descriptor it is given, that the PID path is removed from the init stage's list —
+and that a report the parent cannot adopt still kills the process the helper
+created. It does not perform a real setns; that still needs the guest.
 
 **What a minimal in-guest check looks like.** The node has the built runc and
 containerd, and the harness already ssh's into it (`scripts/guest-check.sh`,
@@ -543,10 +553,11 @@ case, expressed as a pod:
 
 That single hook pod is both the regression test for A/B/C and the acceptance
 test for the PID work: with step 1 only, the pod passes but the namespace check
-fails; with step 2, both pass. Running the full
-`K4S_CILIUM_STRIP_HOOK=0 make test-cluster-cni` would confirm the same thing
-against Cilium's real hook, but it is not needed to establish a verdict — the
-hook pod is cheaper and self-contained.
+fails; with step 2, both pass. That is the check that was used:
+`examples/hook-pod.yaml` was added and is asserted on both boots. The strip is
+gone, so `make test-cluster-cni` with no knob now runs Cilium's real
+`postStart`/`preStop` as well, and that run passes too (`cilium: ok`,
+`hook: ok` on both boots).
 
 I did not run the QEMU cluster for this study. The failure path is pinned by
 code that ends in a single literal `os.Exit(255)` and a single wrapper string
@@ -637,9 +648,10 @@ process is the next stage** — which is nsexec's stage 1 and stage 2 with an
 `execve` where nsexec has its second, raw fork.
 
     runc exec
-      └─ runc-ns <pid-ns-path> <runc> init        (direct child)
+      └─ runc-ns <pid-ns-path> <runc> <runc-argv0> init   (direct child)
            ├─ setns(CLONE_NEWPID, <pid-ns-path>)  -- arms pid_ns_for_children
-           ├─ clone+execve  -->  runc init        (runc's child, container pidns)
+           ├─ clone+execve  -->  runc init        (runc's child, container pidns;
+           │                                        argv[0] is <runc-argv0>)
            ├─ write that pid to the report pipe
            └─ exit 0
 
@@ -651,22 +663,27 @@ process is the next stage** — which is nsexec's stage 1 and stage 2 with an
 Three pieces:
 
 1. **`cmd/runc-ns/main.go`** — the helper, `CGO_ENABLED=0`, in this repository
-   and not in the pinned u-root checkout. `run()` (main.go:68) locks the OS
-   thread and does the `setns` (main.go:89); `startStage()` (main.go:99) starts
-   the next stage with `SysProcAttr.Cloneflags = CLONE_PARENT` (main.go:129) and
+   and not in the pinned u-root checkout. `run()` (main.go:72) locks the OS
+   thread and does the `setns` (main.go:101); `startStage()` (main.go:111) starts
+   the next stage with `SysProcAttr.Cloneflags = CLONE_PARENT` (main.go:145) and
    writes `cmd.Process.Pid` to the descriptor named by
-   `_LIBCONTAINER_RUNCNS_PIDFD`.
+   `_LIBCONTAINER_RUNCNS_PIDFD`. It hands the child `argv[1:]` as its argv
+   (main.go:133), whose argv[0] is the runc argv[0] passed in — not the
+   descriptor path it execs.
 
 2. **The runc fork**, `libcontainer/`:
 
-   - `purego_nocgo.go:79` `stageExecNs` rewrites the exec command: it takes the
+   - `purego_nocgo.go:80` `stageExecNs` rewrites the exec command: it takes the
      PID path out of the init stage's namespace list, finds the helper on PATH
-     (`findRuncNs`, `:138`, `RUNC_NS` overrides), appends one report pipe to
+     (`findRuncNs`, `:144`, `RUNC_NS` overrides), appends one report pipe to
      `cmd.ExtraFiles`, invokes the helper as
-     `runc-ns <pid-ns-path> <runc> init`, and returns the parent end of the
-     pipe. `purego_cgo.go` has the no-op version, so the cgo path is untouched.
-   - `container_linux.go:711` calls it from `newSetnsProcess`, and
-     `container_linux.go:572` is the fix for defect C.
+     `runc-ns <pid-ns-path> <runc> <runc-argv0> init`, and returns the parent end
+     of the pipe. `purego_cgo.go` has the no-op version, so the cgo path is
+     untouched.
+   - `container_linux.go:732` calls it from `newSetnsProcess`, and
+     `container_linux.go:572` is the fix for defect C. The netlink bootstrap
+     payload is now built only under cgo (`:671`, `:717`), because nothing reads
+     it without the C constructor.
    - `process_linux.go:630` `execSetns` branches: with a report pipe it calls
      `adoptRuncNsChild` (`:688`), which replaces the study's
      "wait for the direct child, then decode stage1/stage2 JSON" (`:598-628`
@@ -676,7 +693,7 @@ Three pieces:
    - `process_linux.go:513` is the fix for defect A.
    - `join_namespaces_nocgo.go:69` `joinNamespaces` now opens every namespace
      fd before joining any (`:80`), and calls `detachFs` (`:148`) before a mount
-     join. Its PID-path branch (`:105`) still skips rather than refuses, but now
+     join. Its PID-path branch (`:95`) still skips rather than refuses, but now
      says why, and points at the helper.
 
 3. **Packaging**: `go.work` lists `./cmd/runc-ns`; `DIT` passes `./cmd/runc-ns`
@@ -871,7 +888,9 @@ only namespace joining wrong.
 directly:
 
 - **`os/exec` accepts `Cloneflags: CLONE_PARENT`**, alongside the
-  `CLONE_VFORK|CLONE_VM|CLONE_PIDFD` Go adds itself, and the process it creates
+  `CLONE_VFORK|CLONE_VM` Go adds itself (the syscall layer adds `CLONE_PIDFD`
+  only when `SysProcAttr.PidFD != nil`, which it is not here, and puts `SIGCHLD`
+  in the low byte of the flags), and the process it creates
   really is the *grandparent's* child. A throwaway three-process program
   confirmed `getppid()` of the grandchild is the grandparent's pid, not the
   middle process's, and that the grandparent's `Wait()` on it returned its exit
@@ -921,6 +940,12 @@ is a symlink to `bb`, like `/bbin/uinit`.
   pre-existing divergence from nsexec stage 2 rather than part of this work.
 - **User namespaces are still refused**, by `joinNamespaces`, and the helper
   does not change that.
+- **The review fixes have a fork-side unit test, but it is not the guest.**
+  `libcontainer/purego_nocgo_test.go` covers the helper wiring and the leak fixed
+  after review — a report `adoptRuncNsChild` cannot adopt must kill the process
+  the helper created. The `Wait()`-failure arm of the same leak is covered by the
+  same deferred kill but is not separately provoked, and the test does not perform
+  a real setns. The in-guest evidence remains the hook pod above.
 - The most likely thing still to be wrong is one of those exec shapes: `runc-ns`
   passes the console socket and any preserved descriptors through by
   inheritance, which the host experiment says works, but nothing has actually

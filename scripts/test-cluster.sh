@@ -426,41 +426,15 @@ build_cilium() {
 		--set hubble.enabled=false --set hubble.relay.enabled=false \
 		--set hubble.ui.enabled=false > "$CILIUM_YAML"
 
-	# Drop the agent's postStart hook, and its preStop hook with it.
-	#
-	# Both fail on this node, and the reason is not what either the code or the docs
-	# used to say. The kubelet log has it:
-	#
-	#   OCI runtime exec failed: exec failed: unable to start container process:
-	#   error executing setns process: exit status 255
-	#
-	# `runc exec` does not work in the cgo-free fork: it needs setns, and joining a
-	# PID namespace is one of the two cases the pure-Go path refuses. So the hooks
-	# never run at all -- the kubelet kills the container before its own logic is
-	# reached -- and both failures are the same failure, which is why preStop fails
-	# for something that has nothing to do with the AWS VPC CNI cleanup postStart is
-	# nominally for.
-	#
-	# That also means the fix is not here: no container lifecycle hook can work on
-	# this node until `runc exec` does. K4S_CILIUM_STRIP_HOOK=0 leaves both hooks in
-	# and fails the run, which is how the above was established.
-	if [ "${K4S_CILIUM_STRIP_HOOK:-1}" = 1 ]; then
-	python3 - "$CILIUM_YAML" <<-'PY'
-	import sys
-	path = sys.argv[1]
-	out, skipping, removed = [], False, 0
-	for line in open(path):
-	    if line.rstrip("\n") == "          postStart:":
-	        skipping, removed = True, removed + 1
-	        continue
-	    if skipping and line.rstrip("\n") == "          preStop:":
-	        skipping = False
-	    if not skipping:
-	        out.append(line)
-	assert removed == 1, f"expected one postStart hook, removed {removed}"
-	open(path, "w").writelines(out)
-	PY
-	fi
+	# The agent's postStart and preStop hooks are deliberately left in the
+	# manifest. A lifecycle hook is a `runc exec` -- kubelet runs one through the
+	# CRI's ExecSync, which is the same runtime call -- and `runc exec` works: the
+	# PID namespace an exec needs is joined by cmd/runc-ns. This harness used to
+	# strip both hooks, with K4S_CILIUM_STRIP_HOOK as the escape hatch that proved
+	# the strip was hiding a broken exec; the fix landed and both went away. See
+	# docs/runc-exec.md and examples/hook-pod.yaml, whose postStart is the same
+	# kind of exec in a form that asserts the namespace it lands in. A run with
+	# the hooks in place is the acceptance test for the fix, not a variant.
 }
 
 # --- node image -------------------------------------------------------------

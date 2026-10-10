@@ -266,10 +266,9 @@ Cilium's datapath:
    that `iptables` needs, so `iptables-save` fails, `errexit` fires, the hook exits
    non-zero, and **a failed `postStart` hook makes the kubelet kill the
    container**. Hence exit 2 and an empty log while the binary itself runs fine by
-   hand. The harness drops the hook when it renders the chart; `preStop` fails for
-   the same reason and goes with it. Verified by leaving both in
-   (`K4S_CILIUM_STRIP_HOOK=0`): `Warning FailedPostStartHook`, `Warning
-   FailedPreStopHook`, CrashLoopBackOff.
+   hand. The harness dropped the hook when it rendered the chart; `preStop` failed
+   for the same reason and went with it. Verified at the time by leaving both in:
+   `Warning FailedPostStartHook`, `Warning FailedPreStopHook`, CrashLoopBackOff.
 
    This was recorded here for several rounds as the node lacking `iptables`, then
    briefly as a kernel gap that `IP_NF_IPTABLES_LEGACY`/`NETFILTER_XTABLES_LEGACY`
@@ -281,30 +280,28 @@ Cilium's datapath:
    start container process: error executing setns process: exit status 255
    ```
 
-   **`runc exec` does not work in the cgo-free fork.** It needs `setns`, and joining
-   a PID namespace is one of the two cases the pure-Go path refuses, because it
-   needs a fork Go cannot do -- see `nsenter-and-runc.md`. The hook never runs at
-   all; the container is killed before its own logic is reached. That is why the
-   agent exits 2 with an empty log while the binary runs fine by hand.
+   **At the time, `runc exec` did not work in the cgo-free fork.** It needs `setns`,
+   and joining a PID namespace is one of the two cases the pure-Go path refuses,
+   because it needs a fork Go cannot do -- see `nsenter-and-runc.md`. The hook never
+   ran at all; the container was killed before its own logic was reached. That is
+   why the agent exits 2 with an empty log while the binary runs fine by hand.
 
    It also explains `preStop` failing for something that has nothing to do with the
-   AWS VPC CNI cleanup: both hooks are `exec`s, and every `exec` fails the same way.
+   AWS VPC CNI cleanup: both hooks are `exec`s, and every `exec` failed the same way.
 
-   So the strip is load-bearing, and **the fix is not in this chart** -- it is
-   making `runc exec` work, which is a fork limitation this project already knew
-   about and had not connected to anything. Until then, container lifecycle hooks
-   are unavailable to any workload on this node, not just Cilium. The harness drops
-   both hooks when it renders the chart (`K4S_CILIUM_STRIP_HOOK=0` to leave them in
-   and watch it fail).
+   So the strip was load-bearing then, and **the fix was not in this chart** -- it
+   was making `runc exec` work, which is a fork limitation this project already knew
+   about and had not connected to anything.
 
    **Later:** `runc exec` was fixed (`docs/runc-exec.md`, `cmd/runc-ns`), and
-   `examples/hook-pod.yaml` now asserts that a `postStart` hook runs in the
-   container's own PID namespace. The strip is still the default, and this
-   paragraph's diagnosis of *this* hook is still the last thing anyone measured:
-   the exec failing was the first blocker, and whether the hook's body would then
-   work — it runs `iptables-save`, which needs the agent image's own binary and a
-   mount that propagates, and it was never re-tested — is a separate question that
-   has not been reopened. `K4S_CILIUM_STRIP_HOOK=0` is how to reopen it.
+   `examples/hook-pod.yaml` asserts that a `postStart` hook runs in the container's
+   own PID namespace. **The strip is gone**: `run_cilium` no longer edits the
+   rendered manifest and there is no `K4S_CILIUM_STRIP_HOOK` knob. A run with the
+   hooks left in -- `make test-cluster-cni` with no knob -- now passes with
+   `cilium: ok` and `hook: ok` on both boots, so the hook's body really does work:
+   it shells out to the agent image's own `iptables-save`, and the agent then gets
+   on with starting. The paragraph above is kept as the record of why the strip
+   existed; its cause (the exec failing) is the defect the fix removed.
 
 5. **The kernel has no XFRM, and `netlink.NewHandle` insists on it.** With the
    hook gone the agent ran, logged, did real work — envoy, endpoint manager,
