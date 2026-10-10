@@ -52,8 +52,12 @@ kubelet --version >/dev/null 2>&1 && echo "K4S_CHECK: kubelet: ok" || echo "K4S_
 mkdir -p /run/rootfs/bin
 cp /bbin/bb /run/rootfs/bin/bb
 ln -s bb /run/rootfs/bin/echo
-ctr run --rm --rootfs /run/rootfs k4stest /bin/echo K4S_CONTAINER_OK </dev/null
-echo "K4S_CHECK: container: done"
+# `ctr run` failing must not be silent: this script does not run under set -e, so a
+# failed container run used to fall through to a cheerful `container: done`. One
+# line, because gosh reads its stdin a line at a time and an if/fi block would not
+# survive that. The marker is still what proves the container started; this is what
+# makes a failure report itself through the same channel as every other check.
+ctr run --rm --rootfs /run/rootfs k4stest /bin/echo K4S_CONTAINER_OK </dev/null || echo "K4S_CHECK: container: fail"
 
 echo "K4S_CHECK_END"
 
