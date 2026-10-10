@@ -7,9 +7,10 @@ milestones; `docs/cilium.md` has the Cilium evaluation in full.
 ## The two tests
 
 **`make test`** — the capability check. Boots the image headless under QEMU and
-pipes `scripts/guest-check.sh` into the guest's shell. It asserts three things:
-the image boots, the kernel has the capabilities the node needs, and a container
-runs. It prints `boot: ok`, `capabilities: ok`, `container: ok`.
+runs `scripts/guest-check.sh` inside it over ssh, reading the verdicts from that
+remote command's stdout. It asserts three things: the image boots, the kernel has
+the capabilities the node needs, and a container runs. It prints `boot: ok`,
+`capabilities: ok`, `container: ok`.
 
 **`make test-cluster`** — the M1 join test. Boots a throwaway Kubernetes control
 plane in one VM, then the node image in another, and asserts that kubelet joins,
@@ -57,17 +58,24 @@ is stuck in rather than only the exit, and it distinguishes "the same reason as
 last time" from "a new one" -- so a failure says what Cilium is waiting on
 instead of that something timed out.
 
-**A second, unrelated intermittent failure: the node's `uinit` stopping.** Once, a
-node boot ended with `uinit: containerd: ok` as its last line — no `kubelet:
-started`, no `done; the node is up` — and that run's console also showed
-`clocksource: Marking clocksource tsc unstable` and `TSC found unstable after boot,
-most likely due to broken BIOS`. It has not reproduced on demand.
+**The node's `uinit` stopping mid-boot — and what it turned out to be.** Boots kept
+ending with `uinit: containerd: ok` or `uinit: done; the node is up` as the last
+line, the console showing `clocksource: Marking clocksource tsc unstable` and `TSC
+found unstable after boot, most likely due to broken BIOS` immediately before.
+Recorded here as unreproducible; it then reproduced four times out of four.
 
-The harness cannot currently help with it, and that is the real finding. `make
-test` wraps QEMU in `timeout` and kills the guest when it expires, so a boot that
-never finishes leaves only its console log — and a console log says where something
-stopped, never why. Capturing guest state before killing the VM is the obvious next
-step, and is the reason this is recorded rather than diagnosed.
+It was the TSC. The guest's clock is skewed under KVM, the kernel drops the
+clocksource, and the console wedges at that moment. `tsc=unstable` on the QEMU
+cmdline fixed it — which is what the kernel's own message had been recommending
+the whole time.
+
+Worth recording how long it stayed "intermittent", because the reason was the
+harness and not the bug. `make test` wrapped QEMU in `timeout` and killed the
+guest, so a boot that never finished left only a console log — and a console log
+says where something stopped, never why. It became diagnosable the moment the
+harness started printing the last `uinit:` lines on failure. That is the general
+point, and it outlives the TSC: **make a failure explain itself before adding
+features.**
 
 ## How a cluster test runs
 
@@ -347,7 +355,7 @@ the wrong phase, a lock that was not there. A single watchdog at the top that
 prints the current phase and exits would turn every one of those into a fast,
 informative failure. It is the one structural thing still worth adding.
 
-**The harness is ~1000 lines across 30 functions, and only some of it is the
+**The harness is long and mixes concerns, and only some of it is the
 test.** Roughly: ~50 lines build the control-plane binaries from pinned source,
 ~82 generate the throwaway PKI, ~150 boot and manage VMs, ~100 are Cilium, and
 the rest is applying manifests and checking markers. The VM management in

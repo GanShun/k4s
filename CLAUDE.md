@@ -246,23 +246,26 @@ Fragment entries that are load-bearing and non-obvious:
 
 ## Test harness
 
-Two tests. `make test` feeds its guest a script; `make test-cluster` feeds the
-node nothing.
+Two tests, and **neither feeds its guest anything or reads evidence off the
+console**. Reaching that took three attempts, and the reason is recorded below.
 
 `scripts/test-boot.sh <kernel> <initramfs> [guest-script]` (behind `make test`)
-boots QEMU with `-nographic` and pipes `scripts/guest-check.sh` into the guest's
-stdin. u-root's `gosh` treats a non-tty stdin as a script, so **every line of
-`guest-check.sh` must be a complete command** — no multi-line `if`/`for` blocks —
-and lines must stay short, because the console drops characters when handed a lot
-at once.
+boots QEMU with `-serial file:` and `-display none`, so the console is a
+diagnostic record and nothing depends on the guest's stdin. It then polls — never
+sleeps a budget — for the node's sshd, which `uinit` starts in the node's first
+seconds, and runs `scripts/guest-check.sh` as a remote command whose own stdout is
+the evidence. The image under test is the one `make image` produced, with a
+throwaway key appended as a second cpio archive (the kernel unpacks an initramfs
+in order and a later entry replaces an earlier one) and nothing else changed.
 
-`make test-cluster` feeds its guests **nothing**. Both VMs bring themselves up:
-u-root's init runs `/bbin/uinit`, the bb applet built from `cmd/uinit`, which reads
-`/etc/k4s/role` and runs either the node's bring-up (network, sshd, mounts,
-cgroups, containerd, kubelet) or the control plane's (network, etcd, apiserver,
-controller-manager, scheduler). The console is still captured — with
-`-serial file:`, so nothing depends on the guest's stdin, and `-nographic` is gone
-— because that is where a boot that fails to come up says so first.
+`make test-cluster` brings its guests up the same way. Both run `/bbin/uinit`, the
+bb applet built from `cmd/uinit`, which reads `/etc/k4s/role` and runs either the
+node's bring-up (network, sshd, mounts, cgroups, containerd, kubelet) or the
+control plane's (network, etcd, apiserver, controller-manager, scheduler), and
+both are read over ssh.
+
+Readiness is a real signal rather than a marker: the control plane is ready when
+its apiserver answers on the forwarded port, which is what `wait_apiserver` polls.
 
 That is the shape this always wanted. It replaced a bring-up script piped into
 the node's shell one line at a time, and that protocol cost more time than
@@ -275,25 +278,28 @@ too: a 157-character line lost its redirect and its trailing `&`. A Go program
 has none of those problems, because the kernel runs it rather than a shell
 parsing it.
 
-**Neither VM is fed.** Both bring themselves up from `cmd/uinit`, so the console is
-diagnostic-only everywhere and readiness is a real signal rather than a marker: the
-control plane is ready when its apiserver answers on the forwarded port, which is
-what `wait_apiserver` polls.
-
-The harness reads the node's results over **ssh** (`collect`, `diag`); the console
-is captured to a file so a boot that fails says so, and nothing is read back from
-it. See `docs/testing.md`.
+The last version of the console feed was worse than slow: it *lied*. The check
+script was piped into the tty, the tty echoed it, and the verdicts were grepped
+out of the log that contained both — so a guest that never executed anything
+reported `boot: ok`, `capabilities: ok`, `container: ok` on the source text of its
+own markers. The lesson is not "parse the log more carefully". It is that the
+console echoes, buffers and drops characters, so nothing may be *fed* to it or
+*read* from it, and both instruments were replaced rather than patched.
 
 The QEMU cmdline is
-`console=ttyS0,115200 panic=-1 cgroup_no_v1=all`. The last flag is not
-optional: u-root's init mounts cgroup **v1** controllers, which binds `cpu`,
+`console=ttyS0,115200 panic=-1 cgroup_no_v1=all tsc=unstable`. `cgroup_no_v1` is
+not optional: u-root's init mounts cgroup **v1** controllers, which binds `cpu`,
 `pids` and `io` to v1 and leaves cgroup v2 with only `cpuset` and `memory`; runc
 then fails with `openat2 .../cpu.weight: no such file or directory`.
 
-For `make test`, the harness strips ANSI escapes and `gosh` `$ ` prompt lines
-before grepping, because the guest echoes the script and a literal `fail` also
-appears in the echoed source. Success is: an end marker, no
-`K4S_CHECK: ...: fail`, and the container's own `K4S_CONTAINER_OK` output.
+`tsc=unstable` is not optional here either, though for a different reason: the
+guest's TSC is skewed under KVM, the kernel marks it unstable partway through the
+boot, and the console wedges at that moment. Four consecutive runs failed that way
+before it was added. It is a property of the test VM, not of the node, which is
+why it lives in the harness and not in `configs/`.
+
+Success for `make test` is the guest's own output: `K4S_CHECK_START`, no
+`K4S_CHECK: ...: fail`, and `K4S_CONTAINER_OK` on a line of its own.
 
 ## Key decisions
 
