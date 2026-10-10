@@ -271,10 +271,31 @@ Cilium's datapath:
    (`K4S_CILIUM_STRIP_HOOK=0`): `Warning FailedPostStartHook`, `Warning
    FailedPreStopHook`, CrashLoopBackOff.
 
-   This is also the one place where the kernel fragment buys Cilium a working
-   agent rather than a stripped one: `IP_NF_IPTABLES_LEGACY` and
-   `NETFILTER_XTABLES_LEGACY` are what turn `iptables-save` from a failure into a
-   no-op here, and they are not in `configs/k4s-cni.config` today. See item 8.
+   This was recorded here for several rounds as the node lacking `iptables`, then
+   briefly as a kernel gap that `IP_NF_IPTABLES_LEGACY`/`NETFILTER_XTABLES_LEGACY`
+   would close. Neither is true, and the real cause is neither the image nor the
+   kernel. The kubelet log has the OCI error:
+
+   ```
+   failed to start exec "8ed8...": OCI runtime exec failed: exec failed: unable to
+   start container process: error executing setns process: exit status 255
+   ```
+
+   **`runc exec` does not work in the cgo-free fork.** It needs `setns`, and joining
+   a PID namespace is one of the two cases the pure-Go path refuses, because it
+   needs a fork Go cannot do -- see `nsenter-and-runc.md`. The hook never runs at
+   all; the container is killed before its own logic is reached. That is why the
+   agent exits 2 with an empty log while the binary runs fine by hand.
+
+   It also explains `preStop` failing for something that has nothing to do with the
+   AWS VPC CNI cleanup: both hooks are `exec`s, and every `exec` fails the same way.
+
+   So the strip is load-bearing, and **the fix is not in this chart** -- it is
+   making `runc exec` work, which is a fork limitation this project already knew
+   about and had not connected to anything. Until then, container lifecycle hooks
+   are unavailable to any workload on this node, not just Cilium. The harness drops
+   both hooks when it renders the chart (`K4S_CILIUM_STRIP_HOOK=0` to leave them in
+   and watch it fail).
 
 5. **The kernel has no XFRM, and `netlink.NewHandle` insists on it.** With the
    hook gone the agent ran, logged, did real work — envoy, endpoint manager,

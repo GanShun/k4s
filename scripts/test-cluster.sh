@@ -424,21 +424,22 @@ build_cilium() {
 
 	# Drop the agent's postStart hook, and its preStop hook with it.
 	#
-	# Both fail on this node. Verified, not assumed: with the hooks left in, the
-	# agent goes CrashLoopBackOff with `Warning FailedPostStartHook` and
-	# `Warning FailedPreStopHook` inside 40s, and the kubelet kills the container --
-	# which is the agent exiting 2 with an empty log while the binary itself runs
-	# fine. The postStart hook's own job, deleting iptables rules left behind by
-	# the AWS VPC CNI plugin, is a no-op on a non-AWS node; the failure is that it
-	# runs `iptables-save | grep -c` under `set -o errexit` and the agent image does
-	# not have what it needs.
+	# Both fail on this node, and the reason is not what either the code or the docs
+	# used to say. The kubelet log has it:
 	#
-	# The tempting reading -- Cilium's image bundles iptables, so the hook should
-	# work and this strip is treating a cause that isn't there -- is what
-	# K4S_CILIUM_STRIP_HOOK=0 exists to test, and it is falsified. What is *not*
-	# established is which command is missing; preStop failing too means it is not
-	# just the VPC-CNI cleanup, so "no iptables" is a guess that this does not
-	# confirm.
+	#   OCI runtime exec failed: exec failed: unable to start container process:
+	#   error executing setns process: exit status 255
+	#
+	# `runc exec` does not work in the cgo-free fork: it needs setns, and joining a
+	# PID namespace is one of the two cases the pure-Go path refuses. So the hooks
+	# never run at all -- the kubelet kills the container before its own logic is
+	# reached -- and both failures are the same failure, which is why preStop fails
+	# for something that has nothing to do with the AWS VPC CNI cleanup postStart is
+	# nominally for.
+	#
+	# That also means the fix is not here: no container lifecycle hook can work on
+	# this node until `runc exec` does. K4S_CILIUM_STRIP_HOOK=0 leaves both hooks in
+	# and fails the run, which is how the above was established.
 	if [ "${K4S_CILIUM_STRIP_HOOK:-1}" = 1 ]; then
 	python3 - "$CILIUM_YAML" <<-'PY'
 	import sys

@@ -216,12 +216,30 @@ Verified on a node: the guest joins a throwaway apiserver and runs a pod with
   caller's thread group is empty), and a PID namespace needs the fork nsexec
   performs so that the child becomes PID 1. Those two are refused for a
   container init; for `runc exec` the PID namespace is skipped with a warning.
-- **`runc exec`** (`setnsProcess`) joins every namespace it can, so an exec'd
-  process sees the container's network, ipc, uts and mount namespaces but not
-  its processes. Checkpoint/restore (CRIU) and the mount-source remapping
-  handshake remain untested.
+- **`runc exec` does not work at all, and this is now known rather than untested.**
+  `setnsProcess` joins every namespace it can, so an exec'd process should see the
+  container's network, ipc, uts and mount namespaces but not its processes. In
+  practice it fails before that, with the error the kubelet gets for any container
+  lifecycle hook:
+
+  ```
+  OCI runtime exec failed: exec failed: unable to start container process:
+  error executing setns process: exit status 255
+  ```
+
+  `setns` is invoked on the direct child, and a PID namespace needs the fork
+  `nsexec` performs -- the child has to become PID 1 -- so the refusal above
+  applies to `exec` too, not only to a container init. The consequence is larger
+  than it sounds: **no container lifecycle hook can run on this node**, because
+  `postStart` and `preStop` are both `exec`s. That is why Cilium's agent has to
+  have its hooks stripped (see `cilium.md`), and it applies to any workload, not
+  just Cilium.
+- Checkpoint/restore (CRIU) and the mount-source remapping handshake remain
+  untested.
 - Configurations that force a real `setns`/double-fork will need the PID
-  reporting built back.
+  reporting built back. This is now the concrete shape of that work: `runc exec`
+  is the thing waiting on it, and container hooks are the thing that cannot work
+  without it.
 
 ## Related: cgroup v1 vs v2
 

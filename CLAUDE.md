@@ -357,8 +357,11 @@ Success for `make test` is the guest's own output: `K4S_CHECK_START`, no
 - **Rootless / user namespaces**: not supported. `CLONE_NEWUSER` plus the other
   namespaces in one `clone` returns `EPERM`; nsexec's staged unshare is the
   missing piece. The node runs containers as root, so this does not block it.
-- **`runc exec` / setns path, checkpoint-restore, mount-source remapping**:
-  untested.
+- **`runc exec` does not work**, and that has a visible consequence: `postStart` and
+  `preStop` are `exec`s, so **no container lifecycle hook can run on this node**.
+  It fails with `error executing setns process: exit status 255` — the PID-namespace
+  refusal above applies to `exec` too. This is why Cilium's agent hooks are
+  stripped. Checkpoint-restore and mount-source remapping remain untested.
 - **gobusybox applet flag scoping**: deferred. A per-applet `flag.CommandLine`
   swap at runtime breaks `coredns`, which registers flags from its `coremain`
   library. The correct isolation is separate processes — which is exactly what
