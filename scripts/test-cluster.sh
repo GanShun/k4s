@@ -469,16 +469,7 @@ boot() {
 	# sshd, the mounts and cgroups, containerd and kubelet. The console is still
 	# captured, because that is where a boot that fails to come up says so first.
 	#
-	# This replaced a bring-up script piped into the guest's shell one line at a
-	# time. gosh is not bash, and that protocol cost more time than anything else
-	# in this project: a line had to be short or the console corrupted it, no
-	# line could be a continuation, and `A && B &` was accepted and then silently
-	# ignored. None of that exists now -- the kernel runs the program.
-	#
-	# -serial file: rather than -nographic. With nothing to feed, -nographic
-	# would be reading a closed stdin, and QEMU's stdio chardev can decide to
-	# quit on EOF. This way the console goes to the log and nothing depends on
-	# stdin at all.
+	# -serial file: rather than -nographic, so nothing depends on the guest's stdin.
 	qemu-system-x86_64 -M q35 -m "$NODE_MEM" -smp 2 "${ACCEL[@]}" \
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
 		-device virtio-net-pci,netdev=n0 \
@@ -489,13 +480,8 @@ boot() {
 	echo $! > "$CP/qemu.pid"
 }
 
-# The guest is not asked to power itself off, and nothing waits for it to exit.
-# It used to, and that made the guest's own idea of when it had finished race
-# every check the harness makes: the guest would shut down as soon as its script
-# ended, while the harness was still applying pods and waiting for them, so the
-# files read afterwards were empty and the VM was gone. The harness knows when it
-# is done -- it is the one waiting for the markers -- so it reads what it needs
-# over ssh and then stops the VM.
+# The harness is responsible for stopping the guest when it's done, the guest
+# simply waits for termination.
 stop_guest() {
 	local pid
 	pid=$(cat "$CP/qemu.pid" 2>/dev/null || true)
@@ -522,17 +508,10 @@ stop_guest() {
 # empty file, which made "the kubelet log is empty" and "ssh did not work"
 # indistinguishable.
 #
-# The `if` is load-bearing and was the bug. `out=$(cmd); rc=$?` does not survive
-# `set -e`: when cmd fails the shell exits on the assignment and `rc=$?` never
-# runs, so the idiom written to *handle* a failure was defeated by the option
-# that makes failures fatal. In practice an ssh that failed with 255 killed the
-# whole harness at a point where the last line on stdout was "deployment: ok",
-# with no message, and the failing command was this one.
-#
-# Note also that an ERR trap is not inherited by shell functions unless `set -E`
-# is on, so the ERR trap above did not fire here either -- the diagnostic was
-# invisible at the one place it was needed. `set -Eeuo pipefail` fixes that; the
-# `if` here fixes this.
+# The `if` is load-bearing: `out=$(cmd); rc=$?` does not survive set -e, because the
+# shell exits on the failed assignment and `rc=$?` never runs -- the idiom written
+# to *handle* a failure is defeated by the option that makes failures fatal. An ERR
+# trap is likewise not inherited by shell functions without `set -E`.
 guest_get() {
 	local out rc
 	if out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
@@ -812,10 +791,6 @@ run_cni() {
 # to be hostNetwork.
 run_cilium() {
 	log "applying Cilium"
-	# Remove flannel first. Runs are self-contained now, so a fresh control plane
-	# has no flannel in it, but a DaemonSet left over from a failed earlier apply
-	# in this same run would come back on the new node and give it two CNIs.
-	K delete daemonset k4s-flannel -n kube-system --ignore-not-found >/dev/null 2>&1 || true
 	K apply -f "$CILIUM_YAML" >/dev/null
 	local i ready waiting lastwaiting=""
 	# Generous, because this covers pulling Cilium's images. The node is strictly
