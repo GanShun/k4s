@@ -441,9 +441,13 @@ Every remaining pair is one of the five root causes the work list did not cover.
 causes against the compiled program in the `x/net/bpf` interpreter -- the fixed
 ones asserting the fixed behaviour, the rest asserting the measured one -- so a
 change to any of them is caught in milliseconds without a VM.
-`TestAgainstLibseccomp` is unchanged and still skips nothing new;
+`TestAgainstLibseccomp` is not weakened -- it skips nothing new -- and the
+x86 argument-operator profile added with the low-word fix makes it compare every
+operator on a 32-bit section as well as a 64-bit one.
 `TestAgainstLibseccompPseudoSyscall` adds the multiplexor path to that comparison
-explicitly.
+explicitly. The differential grid already carries high-bit argument values, so a
+return of the full-64-bit comparison on a 32-bit architecture is a test failure
+and not a silent divergence.
 
 The count is not zero, and the reason is not a compile bug: divergences 3-7 are
 name-table and architecture-policy differences between `x/sys/unix` and
