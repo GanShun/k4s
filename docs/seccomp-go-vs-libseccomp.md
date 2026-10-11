@@ -43,10 +43,11 @@ Why this and not the existing test: `TestAgainstLibseccomp` compares the two
 compiled programs **in the `x/net/bpf` interpreter**. That catches a wrong jump
 direction, and it is how the 64-bit-argument and `SCMP_CMP_MASKED_EQ` bugs were
 found. But the interpreter is not the kernel, it cannot see anything that
-depends on `seccomp_data` layout or on the syscall entry path, and it *skips*
-the cases where the two builds are known not to agree -- which is exactly where
-the interesting differences are. It also cannot see differences that are not in
-the program at all, like which syscall *names* resolve.
+depends on `seccomp_data` layout or on the syscall entry path, and until this
+work it *skipped* the x32 cases where the two builds were known not to agree --
+which is exactly where the interesting differences were. It also cannot see
+differences that are not in the program at all, like which syscall *names*
+resolve. The final state compares the x32 cases too, so nothing is skipped.
 
 Design points that make the observations trustworthy:
 
