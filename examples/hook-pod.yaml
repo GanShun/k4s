@@ -1,0 +1,63 @@
+# The regression test for `runc exec`.
+#
+# A container lifecycle hook is a `runc exec`, and until runc could stage one
+# into the container's PID namespace no hook could run on this node: the exec
+# failed with a bare exit status 255. See docs/runc-exec.md. This pod is the
+# smallest thing that fails without the fix
+# and passes with it, and it is deliberately about the runtime rather than
+# about the network -- hostNetwork, like smoke-pod.yaml, so a broken CNI cannot
+# be mistaken for a broken exec.
+#
+# Two assertions, and the second is the interesting one:
+#
+#   * the hook ran at all, which needs `runc exec` to work end to end;
+#   * the hook's own /proc/self/ns/pid is the same namespace as the container
+#     init's. That is what separates "exec works" from "exec works and joined
+#     the container's PID namespace": a hook that ran in the host's PID
+#     namespace would write a different inode, or nothing at all, because the
+#     container's /proc is a procfs mount for that namespace and a process
+#     outside it is not visible in it.
+#
+# The hook runs concurrently with the command, so the two write different files.
+# The namespace files are truncated rather than appended to, because the pod
+# object outlives a reboot and reapply creates the container again: with an
+# append the file would hold one line per container start, and the comparison
+# below is of the whole file.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-hook
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  hostNetwork: true
+  # Always, not Never: the node is diskless, so a reboot wipes the container
+  # kubelet knew about. With Always kubelet recreates it and the hook runs
+  # again, which is what makes this a check on the second boot too.
+  restartPolicy: Always
+  containers:
+    - name: hook
+      image: docker.io/library/busybox:1.36
+      command:
+        - "sh"
+        - "-c"
+        - >-
+          readlink /proc/self/ns/pid > /out/init-ns 2>&1;
+          sleep 3600
+      lifecycle:
+        postStart:
+          exec:
+            command:
+              - "sh"
+              - "-c"
+              - >-
+                echo K4S_HOOK_OK >> /out/result;
+                readlink /proc/self/ns/pid > /out/hook-ns 2>&1
+      volumeMounts:
+        - name: out
+          mountPath: /out
+  volumes:
+    - name: out
+      hostPath:
+        path: /var/log/k4s-hook
+        type: DirectoryOrCreate

@@ -1,0 +1,21 @@
+# kubelet configuration for the k4s node image.
+#
+# cgroupfs, not kubelet's systemd default: the node has no systemd and no dbus,
+# only a cgroup2 mount. containerd's default (SystemdCgroup = false) matches,
+# and a mismatch makes kubelet refuse to start.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: cgroupfs
+containerRuntimeEndpoint: unix:///run/containerd/containerd.sock
+failSwapOn: false
+resolvConf: /etc/resolv.conf
+# The runc fork enforces seccomp without cgo, so the node keeps kubelet's
+# RuntimeDefault rather than weakening it. (The KubeletConfiguration field is a
+# bool; the CLI flag is a string.)
+seccompDefault: true
+# No filesystem eviction. Everything the runtime writes is RAM, so kubelet's
+# ephemeral-storage accounting sees the node fill up whenever an image is pulled
+# and starts evicting pods to reclaim a disk that does not exist -- which is
+# exactly what happened when Cilium's images went in. Memory is still watched.
+evictionHard:
+  memory.available: 200Mi
