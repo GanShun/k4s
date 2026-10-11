@@ -294,9 +294,13 @@ enforced differently depending on which `x/sys/unix` and which libseccomp the
 build happens to use, and nothing pins them to each other.
 
 The practical hazard is version skew: a rule naming a syscall that the *build's*
-table lacks is dropped silently (`logrus.Debugf`, not a warning) on both sides.
-For a *deny* rule that is fail-open, and neither implementation treats it as an
-error.
+table lacks is dropped by both sides, and for a *deny* rule that is fail-open.
+Neither implementation treats it as an error. What changed with the generated
+table is that the two tables are now extracted from the same library, and what
+changed with the guard below is that a stale extraction can no longer be silent:
+the drop is a warning naming the syscall, and a test fails if the committed
+table does not match the libseccomp on the build host. See
+[the staleness guard](#the-staleness-guard).
 
 *Fixed* by the same generated table. `libseccomp_linux.go` is extracted from
 libseccomp through `seccomp_syscall_resolve_num_arch` (the canonical name of
@@ -480,7 +484,11 @@ them are the things that were most likely to be wrong:
 
 All seven root causes are fixed. `libcontainer/seccomp/vmdiff/run.sh` was re-run
 on the same kernel (Linux 6.8) and the same libseccomp (2.5.5) and reports **0
-divergences over 1014 pairs**. The 19 extra pairs over the original 995 are
+divergences over 1014 pairs**. It was re-run again after the staleness guard
+below landed -- the version stamp, the pin refusal, the drift test and the drop
+warning -- and still reports 0 divergences over 1014 pairs, which is the
+evidence that making the drop visible did not change what gets filtered. The 19
+extra pairs over the original 995 are
 `stub-boundary-pseudo-socket`, the case the work list named as missing: a rule
 for `socket` on an x86 section under a restrictive default, evaluated over the
 core probe set plus `i386 socket`, `i386 socketcall(SOCKET)` and a raw
@@ -523,6 +531,59 @@ and x32 syscall entry paths, and `main.go`, `cases.go` and the probe assembly
 carry `//go:build linux && amd64`. Its guest markers are `VMDIFF_BEGIN` and
 `VMDIFF_END`.
 
+## The staleness guard
+
+`libcontainer/seccomp/libseccomp_linux.go` is a snapshot of libseccomp's name
+tables, and the cgo-free build resolves syscall names only from it, while the
+cgo build resolves them from the libseccomp it links against. A libseccomp that
+knows a name the snapshot does not is therefore a divergence in the fail-open
+direction: the cgo build enforces a rule for that name and the cgo-free build
+drops it. Four mechanisms make that impossible to miss rather than silent. None
+of them changes what gets filtered.
+
+1. **The snapshot records the library that produced it.** The generated file
+   carries `const libseccompGeneratedVersion`, emitted from libseccomp's own
+   `seccomp_version()` (`GetLibraryVersion`), not typed by hand, and the file
+   header repeats it.
+
+2. **Regeneration is deliberate.** `internal/mkseccomptables` refuses to run
+   against a libseccomp whose version differs from
+   `gen.PinnedLibseccompVersion` (2.5.5), and the error says which library was
+   found, which one the tables are pinned to, and what to do. Bumping the pin is
+   an edit to that constant, not something a developer's newer library does
+   implicitly. (`-expect-version` exists only so the refusal can be watched
+   firing; a file generated through it still fails the drift test below, because
+   that test uses the constant.)
+
+3. **Drift is a test failure.** `TestGeneratedTablesMatchCommitted`
+   (`libseccomp_drift_test.go`, tagged `cgo && seccomp`) regenerates the tables
+   from the linked libseccomp and compares them with the committed file byte for
+   byte, and separately requires the version the committed file records to equal
+   the host's. A hand-edited entry, a hand-edited version, or a table generated
+   from a different libseccomp all fail. It needs cgo and libseccomp, so it does
+   not exist for the `CGO_ENABLED=0` build; where libseccomp cannot be queried
+   it skips with a message instead of passing.
+
+4. **The drop is visible.** When a profile names a syscall the table cannot
+   resolve, both builds drop the rule -- that is libseccomp's own behaviour and
+   matching it is what produced 0 divergences -- but the drop is now a
+   `logrus.Warnf` naming the syscall (and, in the cgo-free build, the
+   architecture), where it was `logrus.Debugf`. The rule set is unchanged;
+   `TestUnresolvableSyscallWarnsAndDropsNothing` pins both halves: the warning
+   names the syscall, and the compiled program is byte-identical with and
+   without the unresolvable rule.
+
+What it covers: a committed table that no longer matches the libseccomp used to
+build the cgo binary; a hand edit; a stale version stamp. What it does not
+cover: architectures the harness never boots (the tables are generated for the
+17 architectures libseccomp 2.5.5 knows, but only amd64, i386 and x32 are
+exercised); a libseccomp that *removes* a name the snapshot has (the cgo build
+then drops a rule the cgo-free build keeps; which direction is the safe one
+depends on the rule's action, and only regeneration catches it); and the fact
+that the drift test is a test rather than a build step -- `go build -tags
+seccomp` with a newer libseccomp succeeds, and only the runtime warning makes
+the resulting mismatch visible until someone runs the test.
+
 ## What the harness cannot see
 
 - **`SECCOMP_FILTER_FLAG_TSYNC` semantics.** The Go build maps the profile's
@@ -541,13 +602,15 @@ carry `//go:build linux && amd64`. Its guest markers are `VMDIFF_BEGIN` and
   kernel, `x/sys/unix` and libseccomp versions. This run is Linux 6.8 with
   libseccomp 2.5.5 and the `x/sys/unix` vendored in this checkout.
 - **libseccomp versions, and the generated artifact.** `libseccomp_linux.go` is
-  a snapshot of libseccomp 2.5.5's name tables, and nothing in the test suite
-  compares it against the libseccomp on the machine doing the build. A different
-  libseccomp resolves different names; the artifact has to be regenerated with
-  `internal/mkseccomptables`, and the version it came from is in the file
-  header. This is the one place the two builds can drift without a test
-  noticing, and it is deliberate: the alternative is a build that needs
-  libseccomp at `CGO_ENABLED=0` time.
+  a snapshot of libseccomp 2.5.5's name tables. It is no longer true that
+  nothing compares it against the libseccomp on the machine doing the build:
+  `TestGeneratedTablesMatchCommitted` regenerates the tables and compares them
+  byte for byte, and the generator refuses a mismatched version, so a stale
+  artifact is a test failure and an explicit act to fix. What is still outside
+  the guard is that the check is a test rather than a build step, and that a
+  libseccomp which *removes* a name is only caught on regeneration. See
+  [the staleness guard](#the-staleness-guard). The alternative -- a build that
+  needs libseccomp at `CGO_ENABLED=0` time -- is still refused deliberately.
 - **Other architectures.** Only amd64 (with the i386 and x32 entry paths) is
   exercised. The multiplexing rewrite (1) is reachable on i386, mips, ppc and
   s390, and was observed through the i386 compat path; the generated table
@@ -581,8 +644,10 @@ VMDIFF_DIAG=1 CGO_ENABLED=1 go test -tags seccomp -run TestVMDiffArchCompat -v .
 ```
 
 The fast tests, which need no VM and no kernel image. The first runs the pins
-for all seven root causes in the interpreter; the second adds the
-comparison against libseccomp (and so needs libseccomp and its headers):
+for all seven root causes in the interpreter; the second adds the comparison
+against libseccomp (and so needs libseccomp and its headers), including
+`TestGeneratedTablesMatchCommitted`, which regenerates the name tables and
+compares them with the committed file:
 
 ```
 CGO_ENABLED=0 go test ./libcontainer/seccomp/
@@ -590,9 +655,17 @@ CGO_ENABLED=1 go test -tags seccomp ./libcontainer/seccomp/
 ```
 
 And to regenerate the name and multiplexor tables from libseccomp (it rewrites
-`libcontainer/seccomp/libseccomp_linux.go` in place, and the file header records
-which libseccomp it came from):
+`libcontainer/seccomp/libseccomp_linux.go` in place, records in the file which
+libseccomp it came from, and refuses to run against any version but the pin):
 
 ```
 CGO_ENABLED=1 go run -tags seccomp ./libcontainer/seccomp/internal/mkseccomptables
+```
+
+To watch the pin refusal fire, point it at a version the host does not have (no
+file is written, and the error says what to bump and where):
+
+```
+CGO_ENABLED=1 go run -tags seccomp ./libcontainer/seccomp/internal/mkseccomptables \
+  -expect-version 2.5.4 -o /tmp/unused.go
 ```
