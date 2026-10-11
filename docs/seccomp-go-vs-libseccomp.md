@@ -13,11 +13,13 @@ fail-open -- the Go build let through something the libseccomp build stopped --
 and the rest are either fail-closed or a hard failure on one side. None of the
 seven is a crash; all are semantic.
 
-**Two of the seven are now fixed and the other five are not.** The sections that
-follow keep the *before* BPF, because that is what was measured, and say below
-the measurement what changed. The re-run on the same kernel and libseccomp gives
-**51** divergences, all from the five root causes that were deliberately left
-alone; the [status section](#status-after-the-fix) breaks them down.
+**All seven are now fixed.** Each section below keeps the *before* BPF and the
+measured *before* outcome, because that is what was measured, and says below the
+measurement what changed. The re-run on the same kernel (Linux 6.8) and the same
+libseccomp (2.5.5) reports **0 divergences over 1014 pairs** -- the original 995
+plus one case added for the interaction the work list named as missing (a
+multiplexed name under a restrictive default). The [status section](#status) has
+the final table and the reproducibility notes.
 
 Nothing was installed on the host. Every filter was installed by a short-lived
 child process inside a QEMU VM.
@@ -117,19 +119,20 @@ name libseccomp resolves to a negative pseudo-syscall number (`socket` ->
 -101, `bind` -> -102, `msgget` -> -213, ...) where the Go table has a flat
 number (359, 361, 399, ...).
 
-*Fixed.* `libcontainer/seccomp/internal/mkpseudosyscalls` extracts libseccomp's
-negative pseudo-numbers and generates
-`libcontainer/seccomp/pseudosyscalls_linux.go`: for each architecture whose table
-has `socketcall`/`ipc`, the syscall names it multiplexes, the multiplexor's
-number, and the subcall number computed the way libseccomp computes it --
-`(-pseudo) % 100` for the socket family and `% 200` for ipc, which is the
-arithmetic `abi_rule_add` in libseccomp's `syscalls.c` performs. The name list is
-the Go table's, because a name the Go table does not have is dropped by the
-compiler anyway, and the table is generated rather than written down, so it
-cannot drift from the libseccomp it was measured against. `compileArchSection`
-in `libcontainer/seccomp/bpf_linux.go` emits the multiplexed rule *in addition
-to* the flat number, so a kernel with only `socketcall` and one that accepts the
-flat number are both covered.
+*Fixed.* `libcontainer/seccomp/internal/mkseccomptables` extracts libseccomp's
+negative pseudo-numbers and generates `libcontainer/seccomp/libseccomp_linux.go`:
+for each architecture, the syscall names it multiplexes (`libseccompPseudo`),
+the multiplexor's number, the subcall number computed the way libseccomp
+computes it -- `(-pseudo) % 100` for the socket family and `% 200` for ipc, which
+is the arithmetic `abi_rule_add` in libseccomp's `syscalls.c` performs -- and the
+name's direct-wired number, from the reverse enumeration of libseccomp's numbers.
+The name list is libseccomp's own, so a name it resolves to a multiplexing pseudo
+number is carried even when the kernel-header table has no such name (i386
+`recv`, `send`, `accept`, `semop` and `semtimedop` are the cases).
+`compileArchSection` in `libcontainer/seccomp/bpf_linux.go` emits the multiplexed
+rule *in addition to* the direct-wired one whenever libseccomp has one, so a
+kernel with only `socketcall` and one that accepts the flat number are both
+covered.
 
 Closing this exposed one thing the section above did not measure: on a 32-bit
 architecture libseccomp compares only the low 32 bits of every argument,
@@ -193,9 +196,9 @@ without the redundant rule and requiring the two programs to be identical.
 
 The `-ENOSYS` stub boundary is computed by `findLastSyscalls`, which walks every
 rule, redundant or not -- exactly as libseccomp's `patchbpf` does -- so a dropped
-rule still moves the boundary. That is why the remaining boundary divergences are
-the ones whose *names* libseccomp cannot resolve (below), not a difference in
-which of two rules wins.
+rule still moves the boundary. That is why the boundary divergences (divergence
+3, below) were the ones whose *names* libseccomp could not resolve, not a
+difference in which of two rules wins.
 
 
 ### 3. The `-ENOSYS` boundary is computed per implementation, and moves with the name tables
@@ -244,9 +247,19 @@ so libseccomp's boundary is 0 and it emits no stub at all, while the Go build's
 is 457. There `nr=1000` is `ENOSYS` under the Go build and the default action
 under libseccomp.
 
-*Not fixed here.* Closing it means either making the stub boundary independent
-of the name tables (e.g. compute it from the *kernel's* numbering and a
-profile-wide maximum that both agree on) or making the tables identical.
+*Fixed.* Both halves are one fix: the name table the cgo-free compiler resolves
+names with is generated from libseccomp itself (`internal/mkseccomptables` ->
+`libseccomp_linux.go`), and `findLastSyscalls` (`bpf_enosys_linux.go`) takes its
+maximum from that table. A name libseccomp cannot resolve is absent, exactly as
+it is on the cgo side, and a name it resolves to a multiplexing pseudo number is
+absent too -- the pseudo number is negative and cannot raise a maximum, which is
+what libseccomp's own `findLastSyscalls` does with the value it gets. A name
+resolved to a *positive* number still raises the boundary, because libseccomp
+sees a positive number there. `stub-boundary-libc-fallback` now answers ENOSYS
+for `clone3` on both builds, and `TestDivergence3EnosysBoundary` pins the
+boundary at `clone=56`. The new `stub-boundary-pseudo-socket` case covers the
+other half: the positive flat number of a multiplexed name must not raise the
+boundary either, because libseccomp never treats it as a syscall number.
 
 ### 4. Syscall name coverage differs, in both directions
 
@@ -284,9 +297,19 @@ table lacks is dropped silently (`logrus.Debugf`, not a warning) on both sides.
 For a *deny* rule that is fail-open, and neither implementation treats it as an
 error.
 
-*Not fixed here.* Options: resolve names from a single shared table (i.e. ship
-libseccomp's table, or generate one for both), or make an unresolvable name in a
-profile a hard error rather than a debug log.
+*Fixed* by the same generated table. `libseccomp_linux.go` is extracted from
+libseccomp through `seccomp_syscall_resolve_num_arch` (the canonical name of
+every number, which also yields the direct-wired number of a multiplexed name)
+and `seccomp_syscall_resolve_name_arch` (the resolution the cgo build makes
+through `GetSyscallFromName`). A name libseccomp 2.5.5 does not resolve --
+`statmount`, `listmount`, `lsm_list_modules`, `uretprobe` -- is dropped by both
+builds. A name the kernel headers drop but libseccomp resolves is now carried:
+ARM's `cacheflush` is 0x0f0002, and `internal/mksyscalls` ignores numbers above
+`0xffff`, so a rule naming it was a fail-open hole (this run's amd64 harness
+cannot reach it, but the generated table can). `libseccompSyscalls` and
+`libseccompPseudo` are committed Go source; regenerating them needs cgo and
+libseccomp, but the `CGO_ENABLED=0` build never needs either, at build or run
+time. `TestDivergence4NameCoverage` pins both directions.
 
 ### 5. Two conditions on one argument: ANDed, or split into two rules
 
@@ -317,6 +340,19 @@ are just different: an ANDed pair of contradictory conditions is a rule that
 matches nothing, while two rules match either value. Which one a profile author
 meant is not decidable from the profile.
 
+*Fixed.* The reference the harness measures is the cgo build, and it splits,
+because libseccomp's `db_col_rule_add` rejects a second condition on an argument
+index it has already seen (`-EINVAL`, in libseccomp 2.5.5's `src/db.c`) and
+runc's `matchCall` (`libcontainer/seccomp/seccomp_linux.go`) responds by giving
+each condition its own `AddRuleConditional`. The cgo-free compiler now emits one
+rule per condition when two name the same argument index. It is worth being
+explicit that this is *not* libseccomp's own semantics: handed both conditions
+at once, libseccomp would AND them -- and reject the rule. The reference here is
+the cgo build, which is what the harness compares. The work list described the
+two implementations the other way round; the code is the authority and says the
+cgo-free compiler was the one ANDing.
+`TestDivergence5TwoConditionsOneArgument` asserts EACCES for either value.
+
 ### 6. x32, when the profile lists `SCMP_ARCH_X32`
 
 Known and already documented in `docs/nsenter-and-runc.md`; the harness now
@@ -344,6 +380,18 @@ listed (`arch-no-x32` agrees exactly), so the difference is only for profiles
 that ask for x32 -- which containerd's default profile does. The kernel used
 here has `CONFIG_X86_X32_ABI` off, so the ABI is not usable anyway, but the
 filter's answer is still observable.
+
+*Fixed.* libseccomp's x32 table comes from the same generated extraction, and
+`x32_syscall_resolve_name_munge` already sets bit 30 in the numbers it returns,
+so `libseccompSyscalls["SCMP_ARCH_X32"]["read"]` is `0x40000000`. The cgo-free
+compiler now compiles an x32 section whenever a profile lists `SCMP_ARCH_X32`
+and `assembleFilter` (`bpf_linux.go`) dispatches to it on bit 30 -- the only
+signal the kernel gives, since `seccomp_data.arch` is `AUDIT_ARCH_X86_64` for
+both ABIs. When x32 is not listed, the `KILL_THREAD` guard in the x86-64 section
+is unchanged and still matches libseccomp.
+`TestDivergence6X32Filtered` pins both the listed and unlisted behaviour, and
+`TestX32PairSharesOneArchiveValue` pins that the two sections share one audit
+value and are reached by the bit test.
 
 ### 7. An architecture libseccomp will not add is a hard failure for the cgo build
 
@@ -374,9 +422,26 @@ one here, and the extra section it emits for a big-endian architecture can never
 match on a little-endian kernel, so the filter is equivalent in effect -- one
 build just refuses to start.
 
-*Not fixed here.* Closing it means deciding whether an unusable extra
-architecture should be ignored (as the Go build does), rejected (as libseccomp
-does), or rejected only when it is also the native one.
+*Fixed.* The cgo-free compiler now refuses an architecture whose byte order
+differs from the native one -- libseccomp's own rule, since `db_col_db_add`
+returns `EDOM` when `col->endian != db->arch->endian` -- and it returns the same
+error text. `archLittleEndian` / `compileFilter` in
+`libcontainer/seccomp/bpf_linux.go` wrap `unix.EDOM` with
+`"error adding architecture to seccomp filter: %w"`, which renders exactly as
+the cgo path's `fmt.Errorf(..., err)` around libseccomp's errno string, so the
+harness sees the same `install-error` line from both builds rather than two
+different messages. Nothing else is refused: a little-endian architecture beside
+the native one is still installed, as libseccomp installs it.
+`TestDivergence7UnusableArchitectureRefused` pins both directions.
+
+One architecture the harness does not cover is loongarch64. This libseccomp
+(2.5.5) has no table for it, so it is absent from the generated
+`libseccompSyscalls` and `archSyscallTables` falls back to the kernel-header
+table, while the cgo build refuses it at `AddArch`. A profile that lists
+loongarch64 on an amd64 host is therefore still enforced by one build and
+rejected by the other. A *native* loongarch64 build has no cgo build to differ
+from, which is why the fallback is there; the honest statement is that this one
+case is outside what this harness measured.
 
 ## What agrees
 
@@ -410,53 +475,52 @@ them are the things that were most likely to be wrong:
 - **Listing the native architecture explicitly** (as containerd's default
   profile does) is accepted by both.
 
-## Status after the fix
+## Status
 
-Divergences 1 and 2 are fixed. `libcontainer/seccomp/vmdiff/run.sh` was re-run on
-the same kernel (Linux 6.8) and the same libseccomp (2.5.5), over the same 995
-pairs, and reports **51** divergences:
+All seven root causes are fixed. `libcontainer/seccomp/vmdiff/run.sh` was re-run
+on the same kernel (Linux 6.8) and the same libseccomp (2.5.5) and reports **0
+divergences over 1014 pairs**. The 19 extra pairs over the original 995 are
+`stub-boundary-pseudo-socket`, the case the work list named as missing: a rule
+for `socket` on an x86 section under a restrictive default, evaluated over the
+core probe set plus `i386 socket`, `i386 socketcall(SOCKET)` and a raw
+`i386 nr=360`.
 
-| case | pairs | root cause |
-| --- | --- | --- |
-| `arch-mips64n32-listed` | 20 | 7, libseccomp refuses the architecture |
-| `arch-x32-listed` | 3 | 6, x32 |
-| `detect-x32-kill` | 1 | 6, x32 |
-| `arg-same-index-twice` | 1 | 5, two conditions on one argument |
-| `name-statmount-block` | 1 | 4, name coverage |
-| `name-listmount-block` | 1 | 4, name coverage |
-| `name-lsm-list-modules-block` | 1 | 4, name coverage |
-| `name-uretprobe-block` | 1 | 4, name coverage |
-| `redundant-argful-errno-rule` | 5 | 3, the `-ENOSYS` boundary (a `statmount` rule raises the Go boundary; libseccomp cannot resolve the name) |
-| `stub-boundary-statmount` | 3 | 3 |
-| `stub-boundary-redundant-rule` | 4 | 3 |
-| `stub-boundary-libc-fallback` | 5 | 3 |
-| `stub-with-exit-rules` | 5 | 3 |
-| **total** | **51** | |
+| case | pairs | before | after |
+| --- | --- | --- | --- |
+| `arch-mips64n32-listed` | 20 | 20 (cause 7) | 0 |
+| `arch-x32-listed` | 3 | 3 (cause 6) | 0 |
+| `detect-x32-kill` | 1 | 1 (cause 6) | 0 |
+| `arg-same-index-twice` | 1 | 1 (cause 5) | 0 |
+| `name-statmount-block` | 1 | 1 (cause 4) | 0 |
+| `name-listmount-block` | 1 | 1 (cause 4) | 0 |
+| `name-lsm-list-modules-block` | 1 | 1 (cause 4) | 0 |
+| `name-uretprobe-block` | 1 | 1 (cause 4) | 0 |
+| `redundant-argful-errno-rule` | 5 | 5 (cause 3) | 0 |
+| `stub-boundary-statmount` | 3 | 3 (cause 3) | 0 |
+| `stub-boundary-redundant-rule` | 4 | 4 (cause 3) | 0 |
+| `stub-boundary-libc-fallback` | 5 | 5 (cause 3) | 0 |
+| `stub-with-exit-rules` | 5 | 5 (cause 3) | 0 |
+| `stub-boundary-pseudo-socket` (new) | 19 | -- | 0 |
+| **total** | **1014** | **51** | **0** |
 
-`arch-x86-listed` and `duplicate-rules-allow-then-errno` no longer appear: they
-were the single pair each for divergences 1 and 2.
+`arch-x86-listed` and `duplicate-rules-allow-then-errno` never appear after the
+generated table landed: they were the single pair each for divergences 1 and 2.
 
-Every remaining pair is one of the five root causes the work list did not cover.
-`libcontainer/seccomp/bpf_linux_divergence_test.go` pins each of the seven root
-causes against the compiled program in the `x/net/bpf` interpreter -- the fixed
-ones asserting the fixed behaviour, the rest asserting the measured one -- so a
-change to any of them is caught in milliseconds without a VM.
-`TestAgainstLibseccomp` is not weakened -- it skips nothing new -- and the
-x86 argument-operator profile added with the low-word fix makes it compare every
-operator on a 32-bit section as well as a 64-bit one.
-`TestAgainstLibseccompPseudoSyscall` adds the multiplexor path to that comparison
-explicitly. The differential grid already carries high-bit argument values, so a
-return of the full-64-bit comparison on a 32-bit architecture is a test failure
-and not a silent divergence.
+`libcontainer/seccomp/bpf_linux_divergence_test.go` pins each of the seven
+causes against the compiled program in the `x/net/bpf` interpreter -- all of them
+now asserting the fixed behaviour, including where the fix is to refuse or drop
+-- so a change to any is caught in milliseconds without a VM.
+`TestAgainstLibseccomp` is not weakened: it no longer skips the x32 cases, so it
+compares strictly more than it did, and `TestAgainstLibseccompPseudoSyscall`
+still adds the multiplexor path with high-bit argument values. The model test's
+profiles that list x32 now exercise the x32 section, because the model selects a
+section by bit 30 the way `assembleFilter` does.
 
-The count is not zero, and the reason is not a compile bug: divergences 3-7 are
-name-table and architecture-policy differences between `x/sys/unix` and
-libseccomp 2.5.5. Closing 3 and 4 means making the two name tables agree, or
-making an unresolvable name in a profile a hard error; closing 6 needs an x32
-table; closing 7 needs a policy decision about an architecture whose byte order
-differs from the native one; closing 5 needs a decision about whether two
-conditions on one argument are an AND or two rules. None of those is a change to
-how a rule is compiled, which is what this document set out to measure.
+The harness is committed, so these numbers are reproducible rather than a
+snapshot in prose. It is amd64-only by construction: it drives the amd64, i386
+and x32 syscall entry paths, and `main.go`, `cases.go` and the probe assembly
+carry `//go:build linux && amd64`. Its guest markers are `VMDIFF_BEGIN` and
+`VMDIFF_END`.
 
 ## What the harness cannot see
 
@@ -472,12 +536,21 @@ how a rule is compiled, which is what this document set out to measure.
 - **`SCMP_ACT_NOTIFY`.** Both install the listener and both block the notified
   syscall; the harness only confirms the two behave the same, not what an agent
   sees.
-- **Kernel versions.** The name-table divergences (3 and 4) are a function of
-  the kernel, `x/sys/unix` and libseccomp versions. This run is Linux 6.8 with
+- **Kernel versions.** The name coverage (causes 3 and 4) is a function of the
+  kernel, `x/sys/unix` and libseccomp versions. This run is Linux 6.8 with
   libseccomp 2.5.5 and the `x/sys/unix` vendored in this checkout.
-- **Other architectures.** Only amd64 (with i386 and x32 entry paths) is
-  exercised; the multiplexing divergence (1) is reachable on i386, mips and ppc,
-  and was observed through the i386 compat path.
+- **libseccomp versions, and the generated artifact.** `libseccomp_linux.go` is
+  a snapshot of libseccomp 2.5.5's name tables, and nothing in the test suite
+  compares it against the libseccomp on the machine doing the build. A different
+  libseccomp resolves different names; the artifact has to be regenerated with
+  `internal/mkseccomptables`, and the version it came from is in the file
+  header. This is the one place the two builds can drift without a test
+  noticing, and it is deliberate: the alternative is a build that needs
+  libseccomp at `CGO_ENABLED=0` time.
+- **Other architectures.** Only amd64 (with the i386 and x32 entry paths) is
+  exercised. The multiplexing rewrite (1) is reachable on i386, mips, ppc and
+  s390, and was observed through the i386 compat path; the generated table
+  covers the others, but nothing boots them here.
 
 ## Reproducing
 
@@ -515,9 +588,10 @@ CGO_ENABLED=0 go test ./libcontainer/seccomp/
 CGO_ENABLED=1 go test -tags seccomp ./libcontainer/seccomp/
 ```
 
-And to regenerate the multiplexor table from libseccomp (it rewrites
-`libcontainer/seccomp/pseudosyscalls_linux.go` in place):
+And to regenerate the name and multiplexor tables from libseccomp (it rewrites
+`libcontainer/seccomp/libseccomp_linux.go` in place, and the file header records
+which libseccomp it came from):
 
 ```
-CGO_ENABLED=1 go run -tags seccomp ./libcontainer/seccomp/internal/mkpseudosyscalls
+CGO_ENABLED=1 go run -tags seccomp ./libcontainer/seccomp/internal/mkseccomptables
 ```
