@@ -20,11 +20,10 @@
 
 NPROC      := $(shell nproc)
 LINUX      := linux
-# Pinned like every other component: HTTPS at an exact revision, resolved from a
-# tag that the clone then verifies, so a moved tag fails loudly instead of
-# silently building something else.
-LINUX_TAG  := v7.2
-LINUX_REF  := 8d3ae59288f1e7d58d76558a6ee96d533bc5019f
+# Cloned from the kernel's default branch, like every other component. A branch
+# has no fixed revision to verify against, so the old "the tag must still point
+# here" check is gone and the revision that was cloned is printed instead.
+LINUX_BRANCH := master
 BUILD      := build/kernel
 ABS_BUILD  := $(abspath $(BUILD))
 KERNEL     := $(BUILD)/arch/x86/boot/bzImage
@@ -94,7 +93,7 @@ $(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) | $(BUILD) check-pahole
 # story. Depth 1, because a full Linux history is gigabytes and nothing here
 # needs it.
 linux:
-	@scripts/clone-linux.sh $(LINUX_TAG) $(LINUX_REF) $(LINUX)
+	@scripts/clone-linux.sh $(LINUX_BRANCH) $(LINUX)
 
 kernel: linux $(KERNEL)
 

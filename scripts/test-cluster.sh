@@ -432,7 +432,7 @@ build_cilium() {
 	# PID namespace an exec needs is joined by runc's own `runcns` staging
 	# subcommand. This harness used to strip both hooks to hide a broken exec;
 	# the fix landed and the strip went away. See
-	# docs/runc-exec.md and examples/hook-pod.yaml, whose postStart is the same
+	# ../runc/docs/runc-exec.md and examples/hook-pod.yaml, whose postStart is the same
 	# kind of exec in a form that asserts the namespace it lands in. A run with
 	# the hooks in place is the acceptance test for the fix, not a variant.
 }
@@ -997,7 +997,7 @@ check_marker() {
 		echo "  the CRI gave the sandbox an address, but the container reports:" >&2
 		sed 's/^/    /' "$m/netns" >&2
 		echo "  cause: the cgo-free runc does not join namespaces given by path, so" >&2
-		echo "  the container inherits the host's. See docs/nsenter-and-runc.md." >&2
+		echo "  the container inherits the host's. See ../runc/docs/nsenter-and-runc.md." >&2
 		return 1
 	fi
 	if ! grep -q 'K4S_DS_OK' "$m/ds" 2>/dev/null; then
@@ -1035,7 +1035,7 @@ check_marker() {
 	if ! grep -q 'K4S_HOOK_OK' "$m/hook" 2>/dev/null; then
 		echo "hook: FAILED (the postStart hook did not run)" >&2
 		sed 's/^/  /' "$m/hook" 2>/dev/null >&2
-		echo "  a postStart hook is a runc exec; see docs/runc-exec.md" >&2
+		echo "  a postStart hook is a runc exec; see ../runc/docs/runc-exec.md" >&2
 		return 1
 	fi
 	if ! grep -q 'pid:\[' "$m/hook-ns" 2>/dev/null; then
@@ -1053,7 +1053,7 @@ check_marker() {
 		printf '  init: %s\n  hook: %s\n' \
 			"$(cat "$m/init-ns")" "$(cat "$m/hook-ns")" >&2
 		echo "  cause: runc exec did not reach setns(CLONE_NEWPID) with a fork" >&2
-		echo "  after it; see docs/runc-exec.md and runc's runcns subcommand" >&2
+		echo "  after it; see ../runc/docs/runc-exec.md and runc's runcns subcommand" >&2
 		return 1
 	fi
 	echo "pod: ok (container wrote its marker)"

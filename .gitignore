@@ -30,8 +30,8 @@ go.work.sum
 # .idea/
 # .vscode/
 
-# Cloned build inputs (runc is a clone of the fork; see DIT)
-/runc/
+# Cloned build inputs. runc is NOT here: it is the sibling checkout ../runc,
+# deliberately left un-ignored so a stray in-repo clone is visible in git status.
 container*
 cni-plugins
 u-root
@@ -45,6 +45,10 @@ etcd
 # Kernel source checkout (kept out of the repo) and kernel build output
 /linux/
 /build/
+
+# GitLab API token (glpat-*). Never commit: it grants access to the k4s group.
+glpat
+glpat.*
 
 # pi agent task logs (tool-internal, not part of the project)
 .pi/

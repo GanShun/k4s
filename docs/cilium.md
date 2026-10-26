@@ -282,7 +282,7 @@ Cilium's datapath:
 
    **At the time, `runc exec` did not work in the cgo-free fork.** It needs `setns`,
    and joining a PID namespace is one of the two cases the pure-Go path refuses,
-   because it needs a fork Go cannot do -- see `nsenter-and-runc.md`. The hook never
+   because it needs a fork Go cannot do -- see `../runc/docs/nsenter-and-runc.md`. The hook never
    ran at all; the container was killed before its own logic was reached. That is
    why the agent exits 2 with an empty log while the binary runs fine by hand.
 
@@ -293,7 +293,7 @@ Cilium's datapath:
    was making `runc exec` work, which is a fork limitation this project already knew
    about and had not connected to anything.
 
-   **Later:** `runc exec` was fixed (`docs/runc-exec.md`; the staging is the runc
+   **Later:** `runc exec` was fixed (`../runc/docs/runc-exec.md`; the staging is the runc
    fork's internal `runcns` subcommand), and
    `examples/hook-pod.yaml` asserts that a `postStart` hook runs in the container's
    own PID namespace. **The strip is gone**: `run_cilium` no longer edits the
@@ -478,7 +478,7 @@ agent still asks for once it starts.
    **Done (2026-10-05).** The init process joins namespaces given by path
    itself, so a pod with a CNI address really runs in its own netns; flannel
    proved it and `make test-cluster` asserts the container's own view of its
-   interface. See "what is not covered" in `docs/nsenter-and-runc.md`.
+   interface. See "what is not covered" in `../runc/docs/nsenter-and-runc.md`.
 1. ~~**Decide whether the kernel may grow.**~~ **Priced (2026-10-05):** the
    fragment is `configs/k4s-cni.config`, and it costs 1.26 MiB of bzImage and
    about 0.1s of boot. The decision is now about the build host (pahole, a

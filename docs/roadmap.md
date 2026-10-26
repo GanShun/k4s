@@ -1,6 +1,6 @@
 # k4s: Diskless Worker Nodes — Design and Roadmap
 
-Status: **M0 and M1 are done.** The repository builds a pinned kernel and a u-root
+Status: **M0 and M1 are done.** The repository builds a kernel and a u-root
 initramfs carrying `containerd`, `runc`, `flannel`, `coredns`, `etcdctl` and
 `kubelet`, boots under QEMU, joins a throwaway control plane running in a second
 VM, runs a pod under a seccomp filter, and does it again after a reboot. M2
@@ -82,7 +82,7 @@ apiserver only pair the test started with on the host.
 
 ### M0 — Reproducible, bootable image with a QEMU loop
 
-- Rewrite `DIT`: HTTPS instead of `git@github.com:`, pinned SHAs per component,
+- Rewrite `DIT`: HTTPS instead of `git@github.com:`, the upstream default branch per component,
   a single pinned Go toolchain, and fix the `google.golang.org/genproto`
   duplication (unify on the split `.../googleapis/rpc` module) that the repo's
   issue #2 documents.
@@ -101,7 +101,7 @@ apiserver only pair the test started with on the host.
 
 **Status: done (2026-10-04).** `make test-cluster` stands up a throwaway
 **control plane VM** (etcd, kube-apiserver, kube-controller-manager and
-kube-scheduler, all built from the pinned sources and carrying a per-run PKI),
+kube-scheduler, all built from the component checkouts and carrying a per-run PKI),
 issues a kubelet kubeconfig, splices it into a copy of the initramfs, boots the
 node, waits for it to register, applies `examples/smoke-pod.yaml`, and checks
 the container wrote its marker to a hostPath. It then boots the *same image*
@@ -128,7 +128,7 @@ Five things the node image needed, each found by a distinct failure:
 unconditionally, and runc can only compile a profile with cgo plus libseccomp,
 so this was a real gap rather than a nicety: a cgo-free runc could not run a pod
 at all. The runc fork now compiles profiles in Go (see
-`docs/nsenter-and-runc.md`), and the smoke pod asserts that the container reports
+`../runc/docs/nsenter-and-runc.md`), and the smoke pod asserts that the container reports
 `Seccomp: 2`.
 
 The smoke pod is still `hostNetwork: true`, but no longer because CNI is
@@ -149,7 +149,7 @@ worth having answered early. See `docs/testing.md`.
 ### Networking: from no CNI to flannel, and the bug in between (2026-10-05)
 
 The image ships a real CNI: the flannel meta-plugin and its bridge and
-host-local delegates, all pinned, with the network config baked at
+host-local delegates, all from their branches, with the network config baked at
 `/etc/kube-flannel/net-conf.json` (host-gw, because this kernel has no VXLAN).
 flanneld itself runs as a **DaemonSet** (`examples/flannel-ds.yaml`), the way
 it is deployed for real, out of the node's own `/bbin` rather than from flannel's
@@ -188,7 +188,7 @@ container reported the host's `10.0.2.15` on `eth0`: containerd gives every pod
 container its sandbox's network, IPC and UTS namespaces **by path**, and the
 cgo-free runc skipped anything with a path, so every pod ran in the host's
 namespaces while the CRI believed otherwise. The fork now joins them in the init
-process (`docs/nsenter-and-runc.md`), and the check that caught it is the one
+process (`../runc/docs/nsenter-and-runc.md`), and the check that caught it is the one
 that now passes.
 
 Before any of that, the baseline was measured with nothing but the loopback
@@ -201,7 +201,7 @@ synthesises a loopback network of its own and requires two.
 
 ### Control plane bring-up: kubeadm, deferred (2026-10-06)
 
-The test cluster's control plane is hand-rolled: four binaries built from pinned
+The test cluster's control plane is hand-rolled: four binaries built from the component checkouts
 source, baked into a 296 MiB initramfs, with their flags in `cmd/uinit` and their
 PKI written by `scripts/test-cluster.sh`. The alternative is **kubeadm**, and the
 intended direction is to move to it. A familiar `kubeadm`/`kubelet` interface is
@@ -213,7 +213,7 @@ kubeadm costs here:
 
 - the control plane becomes static pods, so kube-apiserver, kube-controller-manager,
   kube-scheduler, etcd and pause arrive as **images pulled from a registry on every
-  run** (~400–500 MiB). Today the 282 MiB of binaries are compiled once from pinned
+  run** (~400–500 MiB). Today the 282 MiB of binaries are compiled once from the component checkouts
   source and baked in, and the control plane needs no registry at all.
 - the control plane VM is `-m 1024`, and a RAM-only image store is a tmpfs, which
   defaults to *half* of RAM. It would need roughly 4 GiB.
@@ -225,7 +225,7 @@ are the only consumer.
 The kernel is **not** an obstacle, which is worth knowing before someone looks:
 kubeadm's preflight wants `overlay`, `br_netfilter` and iptables, and this image
 has `CONFIG_OVERLAY_FS=y`, `CONFIG_BRIDGE_NETFILTER=y` and `CONFIG_NF_TABLES=y`.
-kubeadm is also already in the pinned `kubernetes/` checkout, so building it adds
+kubeadm is also already in the `kubernetes/` checkout, so building it adds
 no new dependency.
 
 A middle path, if only the PKI is wanted: `kubeadm init phase certs all` and
@@ -363,7 +363,7 @@ guess. A claim that can be tested should be, before it is written down as cause.
 
 Both hooks failing turned out to have a cause further down: `runc exec` was broken
 for three unrelated reasons, and the PID namespace was a fourth. That was found
-and fixed later (`docs/runc-exec.md`). The strip and its knob are now **gone**:
+and fixed later (`../runc/docs/runc-exec.md`). The strip and its knob are now **gone**:
 `run_cilium` leaves the chart's hooks in the manifest, and
 `make test-cluster-cni` with no knob is the acceptance test — it passes with
 `cilium: ok` and `hook: ok` on both boots. So what this hook's body needs once
@@ -399,8 +399,9 @@ and the parent's adoption of the reported pid are unchanged from the version the
 guest already verified. The k4s tree loses `cmd/runc-ns/` and its `go.work` line;
 `DIT` no longer passes it to `u-root`; and the image no longer carries
 `/bbin/runc-ns`. `examples/hook-pod.yaml` and the harness assertions stay, because
-they test behaviour, not where the stage lives. `docs/runc-exec.md` §6 has the
-design and the line pins.
+they test behaviour, not where the stage lives. `../runc/docs/runc-exec.md` §6 has the
+design and the line pins, and the fork's `ROADMAP.md` (on its `roadmap` branch)
+§2.4 has the mechanism.
 
 ### M2 — Ephemeral hygiene and the kill switch
 

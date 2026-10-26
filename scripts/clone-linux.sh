@@ -6,27 +6,21 @@
 # with a kconfig error that never said "clone me". This is called by `make linux`,
 # which `make kernel` depends on.
 #
-# Pinned the way the rest of the components are: HTTPS at an exact revision, from
-# a tag that is then verified, so a tag that has moved fails loudly here instead
-# of quietly building something else. Depth 1 because a full Linux history is
-# gigabytes and nothing in this project needs it.
+# Cloned from the kernel's default branch, like every other component. A branch
+# has no fixed revision to verify against, so the old tag verification is gone:
+# there was an exact revision to compare against, and now there is not. The
+# revision that was cloned is printed instead, which is the same replacement the
+# rest of DIT uses. Depth 1 because a full Linux history is gigabytes and
+# nothing in this project needs it.
 set -eu
 
-tag=$1 ref=$2 dest=$3
+branch=$1 dest=$2
 
 if [ -d "$dest/.git" ]; then
-	exit 0
+    exit 0
 fi
 
-echo "cloning linux $tag (depth 1)"
-git clone --depth 1 --branch "$tag" \
-	https://github.com/torvalds/linux.git "$dest"
+echo "cloning linux $branch (depth 1)"
+git clone --depth 1 --branch "$branch" https://github.com/torvalds/linux.git "$dest"
 
-got=$(git -C "$dest" rev-parse HEAD)
-if [ "$got" != "$ref" ]; then
-	echo "clone-linux: $tag is $got, expected $ref" >&2
-	# Do not leave a checkout that is the wrong revision behind: the next run
-	# would see .git and skip the clone, and the mistake would stick.
-	rm -rf "$dest"
-	exit 1
-fi
+echo "cloned linux $(git -C "$dest" rev-parse HEAD)"

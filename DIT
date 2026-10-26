@@ -2,22 +2,23 @@
 #
 # DIT - build the k4s initramfs.
 #
-# Fetches each component over HTTPS at an exact pinned revision, tidies it, and
-# assembles a single BusyBox-style initramfs with gobusybox.
+# Fetches each component over HTTPS from its upstream default branch, tidies it,
+# and assembles a single BusyBox-style initramfs with gobusybox.
 #
 # Two deliberate changes from the original script:
 #
 #   * HTTPS instead of SSH. These repositories are public, so no key material
 #     is needed: the build runs on a clean host or CI runner, and nothing
-#     secret can leak into the log or into a checkout's .git/config.
+#     secret can leak into the log or into a checkout's .git/config. runc is
+#     not fetched here at all: it is the sibling checkout ../runc, which the
+#     build requires and never clones.
 #
-#   * Exact revisions instead of `--depth 1` on default branches. Branch tips
-#     move, so the original produced a different dependency graph on every run;
-#     the current containerd tip, for example, already requires Go 1.27. The
-#     revisions below are the upstream tips from the era this repository was
-#     written (2026-05-01 through 2026-05-12). They are all `go` <= 1.26.2, so
-#     they remain valid for the committed go.work. Move a component by editing
-#     its *_REF deliberately.
+#   * Branches instead of exact revisions. Each component is named by its
+#     upstream default branch, so nothing here is invalidated by a rebase or by
+#     a branch moving. That trades reproducibility for maintainability: a fresh
+#     host gets whatever the branch points at today, and the revision actually
+#     built is printed for every component. An existing checkout is used
+#     exactly as it stands, local modifications included.
 #
 # go.work is committed and is NOT regenerated here: it already lists every
 # module below, and it carries the dependency pin the build relies on. Note
@@ -26,62 +27,77 @@
 
 set -euxo pipefail
 
-# --- pinned revisions -------------------------------------------------------
+# DIT is run as ./DIT from the repository root. Record that root once: runc is
+# a sibling checkout (../runc), so a subshell that cds into it can no longer
+# reach build/ by a relative path.
+REPO_ROOT=$(pwd)
+
+# --- component branches -------------------------------------------------------
 UROOT_REPO=https://github.com/u-root/u-root.git
-UROOT_REF=25f9f897fcf2d5431b43daccc970215713547268       # main, 2026-05-01
+UROOT_REF=main
 
 CONTAINERD_REPO=https://github.com/containerd/containerd.git
-CONTAINERD_REF=ed061a08de19ce99d223c60dfdbdf6054dd94290  # main, 2026-05-01
+CONTAINERD_REF=main
 
 COREDNS_REPO=https://github.com/coredns/coredns.git
-COREDNS_REF=145029c847d3f4c4d36918f8658631f40616745f     # master, 2026-05-01
+COREDNS_REF=master
 
 ETCD_REPO=https://github.com/etcd-io/etcd.git
-ETCD_REF=0bd70ca863d9f36c2776ef7f38cd35f12cca8d4a       # main, 2026-05-01
+ETCD_REF=main
 
+# The one component not on its upstream default branch, and a deliberate
+# exception: flannel's `master` cannot build CGO_ENABLED=0. Its
+# pkg/backend/udp/cproxy_amd64.go imports "C", and the pure-Go replacement
+# (proxy.go, `//go:build !cgo`) lives only on this branch. A CGO_ENABLED=0
+# build of `master` fails with
+#   undefined: runCProxy, stopProxy, setRoute, removeRoute
 FLANNEL_REPO=https://github.com/u-root/flannel.git
-FLANNEL_REF=0567dde14a09315931e55c3cb77d43f53e0e1db3     # purego, 2026-05-12 (pure-Go proxy)
+FLANNEL_REF=purego
 
-# runc is the one component this project has a fork of and develops, so it is
-# built from the checkout in runc/ as it stands rather than being reset to a
-# revision: a local branch, or an uncommitted change, is exactly what you want
-# to test. RUNC_REF only creates that checkout when there is not one, so a clean
-# tree still builds, and the revision that goes into the image is printed either
-# way. Everything else here is pinned strictly.
-RUNC_REPO=https://github.com/GanShun/runc.git
-RUNC_REF=d8fe9e94fe4b6bdced1cf1d2f3ea325a896322ea  # purego-seccomp, 2026-10-05
+# runc is the one component this project has a fork of and develops, and it is a
+# *sibling repository* rather than a directory in this one: it is built from
+# ../runc as it stands rather than being reset to a revision, because a local
+# branch, or an uncommitted change, is exactly what you want to test. There is
+# no clone fallback: a fallback could only fetch a runc that cannot run
+# container hooks, so a missing checkout is a hard error at the fetch step.
+#
+# The sibling checkout. Deliberately outside this repository: it is a separate
+# repository with its own branches and remotes, and `go.work` names it as
+# `../runc` too.
+RUNC_DIR=../runc
 
 KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
-KUBERNETES_REF=1c2e10a409eb1b03f2f28f401ce935312e20d9fb  # v1.35.8
+KUBERNETES_REF=master
 
 CNI_REPO=https://github.com/containernetworking/plugins.git
-CNI_REF=257ef09a103e8b8fe91a0fefe8680c01f84b520b           # main, 2026-09-15
+CNI_REF=main
 
 # flanneld is only half of flannel. The CNI half is a separate repository: a
 # meta-plugin that reads the subnet flanneld allocated out of
 # /run/flannel/subnet.env and invokes bridge and host-local with it.
 FLANNEL_CNI_REPO=https://github.com/flannel-io/cni-plugin.git
-FLANNEL_CNI_REF=b380f201008e9bed159703846cf10d3c50b4f9ce  # v1.9.1-flannel3
+FLANNEL_CNI_REF=main
 
 # --- fetch ------------------------------------------------------------------
-# Fetch <ref> into <dir>. <ref> may be a commit, tag, or branch; a commit is
-# what makes the image reproducible. An existing checkout is reused, so a rerun
-# after a failed build does not die on "destination path already exists".
+# Fetch <ref> into <dir>, or reuse an existing checkout exactly as it stands.
+# Nothing is fetched or reset into an existing checkout: a local branch, or an
+# uncommitted change, is exactly what you want to test, and clobbering it is
+# never acceptable. The revision that goes into the image is printed for every
+# component, and that report is what replaces the old pin.
 clone_pinned() {
-	local dir=$1 repo=$2 ref=$3
-	if [ ! -e "$dir" ]; then
-		git init -q "$dir"
-		git -C "$dir" remote add origin "$repo"
-	elif [ ! -d "$dir/.git" ]; then
-		echo "error: $dir exists and is not a git checkout" >&2
-		exit 1
-	fi
-	git -C "$dir" remote set-url origin "$repo"
-	git -C "$dir" fetch -q --depth 1 origin "$ref"
-	git -C "$dir" checkout -q --detach FETCH_HEAD
+    local dir=$1 repo=$2 ref=$3
+    if [ -d "$dir/.git" ]; then
+        : # reuse the checkout as it stands
+    elif [ -e "$dir" ]; then
+        echo "error: $dir exists and is not a git checkout" >&2
+        exit 1
+    else
+        git clone -q --depth 1 --branch "$ref" "$repo" "$dir"
+    fi
+    echo "  $dir $(git -C "$dir" rev-parse --short HEAD) ($(git -C "$dir" rev-parse --abbrev-ref HEAD), $(git -C "$dir" status --porcelain | wc -l) modified)"
 }
 
-echo "Fetching pinned components"
+echo "Fetching component branches"
 clone_pinned u-root     "$UROOT_REPO"     "$UROOT_REF"
 clone_pinned containerd "$CONTAINERD_REPO" "$CONTAINERD_REF"
 clone_pinned coredns    "$COREDNS_REPO"    "$COREDNS_REF"
@@ -91,21 +107,15 @@ clone_pinned kubernetes "$KUBERNETES_REPO" "$KUBERNETES_REF"
 clone_pinned cni-plugins "$CNI_REPO" "$CNI_REF"
 clone_pinned flannel-cni-plugin "$FLANNEL_CNI_REPO" "$FLANNEL_CNI_REF"
 
-# runc is used as checked out, not reset to a revision (see the note by its pin).
-if [ ! -e runc ]; then
-	echo "runc: no checkout, cloning $RUNC_REF"
-	clone_pinned runc "$RUNC_REPO" "$RUNC_REF"
-fi
-if [ ! -d runc/.git ]; then
-	echo "error: runc exists and is not a git checkout" >&2
+if [ ! -d "$RUNC_DIR/.git" ]; then
+	echo "error: no runc checkout at $RUNC_DIR" >&2
+	echo "       the sibling repository is required: it is the cgo-free fork" >&2
+	echo "       this image needs, and the build never clones it." >&2
 	exit 1
 fi
-echo "runc: building $(git -C runc rev-parse --short HEAD)" \
-	"($(git -C runc rev-parse --abbrev-ref HEAD)," \
-	"$(git -C runc status --porcelain | wc -l) modified files)"
-if [ "$(git -C runc rev-parse HEAD)" != "$RUNC_REF" ]; then
-	echo "note: runc/ is not the pinned $RUNC_REF; building the local checkout"
-fi
+echo "runc: building $(git -C "$RUNC_DIR" rev-parse --short HEAD)" \
+	"($(git -C "$RUNC_DIR" rev-parse --abbrev-ref HEAD)," \
+	"$(git -C "$RUNC_DIR" status --porcelain | wc -l) modified files)"
 
 # --- tidy -------------------------------------------------------------------
 (cd containerd && go mod tidy)
@@ -126,12 +136,12 @@ fi
 # creates the container namespaces with clone(2) instead of the C nsexec
 # constructor, and it compiles seccomp profiles to BPF instead of calling
 # libseccomp. So it builds with CGO_ENABLED=0 and still enforces seccomp. See
-# docs/nsenter-and-runc.md. User namespaces still need the staged unshare that
+# ../runc/docs/nsenter-and-runc.md. User namespaces still need the staged unshare that
 # nsexec implements, and are not handled.
 mkdir -p build
 (cd containerd && CGO_ENABLED=0 env -u GOARCH -u GOOS go build \
 	-o ../build/containerd-shim-runc-v2 ./cmd/containerd-shim-runc-v2)
-(cd runc && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -o ../build/runc .)
+(cd "$RUNC_DIR" && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -o "$REPO_ROOT/build/runc" .)
 # kubelet is pure Go, but it is one large binary rather than a bb applet.
 # The version stamp keeps the apiserver skew check happy.
 (cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
@@ -176,7 +186,7 @@ CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 # installed just above -- the two roles have to be one package because u-root
 # builds bb with GO111MODULE=off and links only the packages named here, so an
 # applet cannot import a sibling package. runc exec's namespace staging is not
-# here: it is a subcommand of the runc binary itself (runc/libcontainer/
+# here: it is a subcommand of the runc binary itself (../runc/libcontainer/
 # runcns_linux.go), so there is no second helper to package.
 ./u-root/u-root -o initramfs.cpio \
 	-files build/containerd-shim-runc-v2:bin/containerd-shim-runc-v2 \

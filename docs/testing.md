@@ -25,7 +25,7 @@ either: `make kernel` applies both fragments, so the two cluster tests differ on
 in what they install on the node.
 
 **`make test-all`** runs all three, in order of increasing cost. From a fresh
-checkout that is the whole story — `make linux` clones the pinned kernel checkout
+checkout that is the whole story — `make linux` clones the kernel checkout
 and `DIT` fetches everything else. The legs themselves are roughly 2 minutes for
 `make test`, 75 seconds for two flannel boots and 210 seconds for two Cilium boots,
 whose agent has to install itself before the node can become Ready at all. A whole
@@ -356,7 +356,7 @@ prints the current phase and exits would turn every one of those into a fast,
 informative failure. It is the one structural thing still worth adding.
 
 **The harness is long and mixes concerns, and only some of it is the
-test.** Roughly: ~50 lines build the control-plane binaries from pinned source,
+test.** Roughly: ~50 lines build the control-plane binaries from the component checkouts,
 ~82 generate the throwaway PKI, ~150 boot and manage VMs, ~100 are Cilium, and
 the rest is applying manifests and checking markers. The VM management in
 particular is generic (`cp_up`, `boot`, `stop_guest`, `kill_qemu_for`,
