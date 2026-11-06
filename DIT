@@ -10,8 +10,8 @@
 #   * HTTPS instead of SSH. These repositories are public, so no key material
 #     is needed: the build runs on a clean host or CI runner, and nothing
 #     secret can leak into the log or into a checkout's .git/config. runc is
-#     not fetched here at all: it is the sibling checkout ../runc, which the
-#     build requires and never clones.
+#     the sibling checkout ../runc, used as it stands; it is cloned only when
+#     there is none (see RUNC_REPO below).
 #
 #   * Branches instead of exact revisions. Each component is named by its
 #     upstream default branch, so nothing here is invalidated by a rebase or by
@@ -57,14 +57,20 @@ FLANNEL_REF=purego
 # runc is the one component this project has a fork of and develops, and it is a
 # *sibling repository* rather than a directory in this one: it is built from
 # ../runc as it stands rather than being reset to a revision, because a local
-# branch, or an uncommitted change, is exactly what you want to test. There is
-# no clone fallback: a fallback could only fetch a runc that cannot run
-# container hooks, so a missing checkout is a hard error at the fetch step.
+# branch, or an uncommitted change, is exactly what you want to test.
 #
 # The sibling checkout. Deliberately outside this repository: it is a separate
 # repository with its own branches and remotes, and `go.work` names it as
 # `../runc` too.
 RUNC_DIR=../runc
+#
+# Only when there is no checkout at all is one cloned, from the published fork
+# branch, so a fresh clone of this repository builds on its own. That branch
+# carries the runcns exec staging the hook assertions need; the stock purego
+# branches do not, which is why the fallback names this one and nothing else.
+# An existing ../runc is never fetched into or reset.
+RUNC_REPO=${RUNC_REPO:-https://github.com/GanShun/runc.git}
+RUNC_REF=${RUNC_REF:-k4s-dev}
 
 KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
 KUBERNETES_REF=master
@@ -107,11 +113,12 @@ clone_pinned kubernetes "$KUBERNETES_REPO" "$KUBERNETES_REF"
 clone_pinned cni-plugins "$CNI_REPO" "$CNI_REF"
 clone_pinned flannel-cni-plugin "$FLANNEL_CNI_REPO" "$FLANNEL_CNI_REF"
 
-if [ ! -d "$RUNC_DIR/.git" ]; then
-	echo "error: no runc checkout at $RUNC_DIR" >&2
-	echo "       the sibling repository is required: it is the cgo-free fork" >&2
-	echo "       this image needs, and the build never clones it." >&2
+if [ -e "$RUNC_DIR" ] && [ ! -d "$RUNC_DIR/.git" ]; then
+	echo "error: $RUNC_DIR exists and is not a git checkout" >&2
 	exit 1
+elif [ ! -e "$RUNC_DIR" ]; then
+	echo "runc: no checkout at $RUNC_DIR; cloning $RUNC_REPO $RUNC_REF"
+	git clone -q --branch "$RUNC_REF" "$RUNC_REPO" "$RUNC_DIR"
 fi
 echo "runc: building $(git -C "$RUNC_DIR" rev-parse --short HEAD)" \
 	"($(git -C "$RUNC_DIR" rev-parse --abbrev-ref HEAD)," \
