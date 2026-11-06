@@ -4,6 +4,11 @@ k4s is short for KUTIES, which is Kubernetes plus U-root utiliTIES.
 
 ![The KUTIES logo](kuties.svg)
 
+> **Trying the diskless worker node?** This branch builds a diskless Kubernetes
+> worker-node image and tests it under QEMU. Start with
+> [`docs/quickstart.md`](docs/quickstart.md), which has the machine requirements
+> (KVM, RAM, disk) and the one command that builds and tests everything.
+
 ## How it works
 
 Kubernetes tools (e.g. runc) are integrated via the
