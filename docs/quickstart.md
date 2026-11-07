@@ -30,7 +30,7 @@ RAM).
 | RAM, flannel (`make test-cluster`) | 6 GiB | 8 GiB | The control-plane VM takes 1 GiB and the node 1.5 GiB, plus the host-side build |
 | RAM, Cilium (`make test-cluster-cni`) | 12 GiB | 16 GiB | The node VM needs 6 GiB: its image store is a tmpfs, which gets half of the node's RAM |
 | Disk | 30 GiB free | 50 GiB | Measured: kernel checkout 8.5 GiB, `build/` 4.6 GiB, component checkouts about 1 GiB, Go module cache 4.6 GiB, Go build cache 3.1 GiB, `initramfs.cpio` about 230 MiB |
-| Network | outbound HTTPS | | github.com (components and kernel), proxy.golang.org, docker.io and registry.k8s.io (test images), helm.cilium.io and quay.io (Cilium) |
+| Network | outbound HTTPS | | github.com (components), git.kernel.org (the kernel, from the stable tree), proxy.golang.org, docker.io and registry.k8s.io (test images), helm.cilium.io and quay.io (Cilium) |
 | Local ports | | | 6443 (the apiserver forward), 2222 and 2223 (ssh into the node) must be free |
 | Root | **not needed** | | The VMs use QEMU user-mode networking, and nothing is mounted on the host |
 

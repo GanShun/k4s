@@ -20,10 +20,20 @@
 
 NPROC      := $(shell nproc)
 LINUX      := linux
-# Cloned from the kernel's default branch, like every other component. A branch
-# has no fixed revision to verify against, so the old "the tag must still point
-# here" check is gone and the revision that was cloned is printed instead.
-LINUX_BRANCH := master
+# A longterm branch, not master and not the current stable. `master` is a moving
+# feature branch: a Kconfig change landed there between one clone and another and
+# silently dropped CONFIG_PROC_SYSCTL from the generated config, so the kernel one
+# machine built was not the kernel CI built.
+#
+# The current stable line (7.3.3 when this was written), moved deliberately when we
+# want to. Not master, which is a moving feature branch; not a longterm for now,
+# because the node tracks what Cilium and the eBPF datapath are developed against.
+# A stable branch carries backported fixes and no features, so the kernel cannot
+# change shape under a build -- when it does need to change, that is a commit here.
+LINUX_BRANCH := linux-7.3.y
+# The stable tree is where that branch lives; torvalds/linux has no linux-X.Y.y
+# branches at all.
+LINUX_REMOTE := https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 BUILD      := build/kernel
 ABS_BUILD  := $(abspath $(BUILD))
 KERNEL     := $(BUILD)/arch/x86/boot/bzImage
@@ -45,6 +55,7 @@ QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
               -append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" -no-reboot
 
 .PHONY: all linux image kernel run test test-cluster test-cluster-cni test-runc test-all \
+         check-pahole check-fragments FORCE \
         check-pahole clean distclean
 
 all: image
@@ -81,10 +92,61 @@ check-pahole:
 # olddefconfig and the bzImage relink on every single make -- including every
 # `make test`. Order-only still builds it, and still before the recipe, but it no
 # longer counts towards whether .config is up to date.
-$(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) | $(BUILD) check-pahole
+# Runs every time; the recipe above only rewrites the stamp when the version
+# differs, so a stable toolchain never invalidates the config.
+FORCE:
+
+# Whether DEBUG_INFO_BTF can be enabled depends on pahole, and olddefconfig drops
+# the symbol silently when it cannot. A .config generated before pahole existed is
+# then wrong *and* newer than the fragments, so make would never rebuild it -- which
+# is how the image ended up booting a kernel with no BTF. Recording the version as a
+# dependency regenerates the config once, and only once, when pahole appears or
+# changes.
+$(BUILD)/pahole.version: FORCE | $(BUILD) check-pahole
+	@v=$$($(PAHOLE) --version 2>/dev/null | head -1); \
+	if [ "$$v" != "$$(cat $@ 2>/dev/null)" ]; then echo "$$v" > $@; fi
+
+$(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) $(BUILD)/pahole.version | $(BUILD) check-pahole
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) tinyconfig
 	cat $(FRAGMENT) $(CNI_FRAGMENT) >> $(BUILD)/.config
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) olddefconfig
+	$(MAKE) check-fragments
+
+# A fragment symbol that olddefconfig cannot satisfy is dropped, not reported:
+# tinyconfig turns a dependency off, which *hides* the option, and the config comes
+# out without it. That is how CONFIG_DEBUG_INFO_BTF went missing -- the kernel in the
+# image had no BTF, so every eBPF program Cilium tried to load failed CO-RE
+# relocation with "no BTF found", and nothing said so. It is the same class as
+# TMPFS, VIRTIO and BLK_CGROUP, which this file already calls load-bearing by hand.
+#
+# So every `CONFIG_X=y` a fragment asks for must be in the resulting .config, or the
+# build stops and names them. Only =y lines are checked: `# CONFIG_X is not set` is
+# a deliberate negative and `CONFIG_X="..."` may legitimately take another value.
+check-fragments:
+	@[ -f $(BUILD)/.config ] || { \
+		echo "  no .config yet; the recipe that generates it checks the fragments"; \
+		exit 0; \
+	}; \
+	missing=$$( \
+		for f in $(FRAGMENT) $(CNI_FRAGMENT); do \
+			grep -E '^CONFIG_[A-Z0-9_]+=y$$' $$f; \
+		done | sort -u | while read -r want; do \
+			grep -qxF "$$want" $(BUILD)/.config || echo "$$want"; \
+		done); \
+	if [ -n "$$missing" ]; then \
+		echo "these fragment symbols are not in $(BUILD)/.config:" >&2; \
+		printf '  %s\n' $$missing >&2; \
+		echo "three causes, in order of how often they are it:" >&2; \
+		echo "  * linux/ is not on $(LINUX_BRANCH): a checkout from another branch" >&2; \
+		echo "    cannot satisfy a symbol that only exists on this one. move it," >&2; \
+		echo "    or delete it and let 'make linux' clone the right branch;" >&2; \
+		echo "  * a dependency is off, which hides the option instead of failing" >&2; \
+		echo "    it -- check the fragment above the symbol;" >&2; \
+		echo "  * this config is stale: generated when a dependency (pahole," >&2; \
+		echo "    usually) was missing, and newer than the fragments so make will" >&2; \
+		echo "    not redo it. delete $(BUILD)/.config and run 'make kernel'." >&2; \
+		exit 1; \
+	fi
 
 # A fresh checkout has no kernel, and the first `make kernel` fails with a
 # kconfig error from inside the kernel's own build that does not say "clone me".
@@ -93,9 +155,10 @@ $(BUILD)/.config: $(FRAGMENT) $(CNI_FRAGMENT) | $(BUILD) check-pahole
 # story. Depth 1, because a full Linux history is gigabytes and nothing here
 # needs it.
 linux:
-	@scripts/clone-linux.sh $(LINUX_BRANCH) $(LINUX)
+	@scripts/clone-linux.sh $(LINUX_BRANCH) $(LINUX) $(LINUX_REMOTE)
 
 kernel: linux $(KERNEL)
+	@$(MAKE) --no-print-directory check-fragments
 
 $(KERNEL): $(BUILD)/.config
 	$(MAKE) -C $(LINUX) O=$(ABS_BUILD) PAHOLE=$(PAHOLE) -j$(NPROC) bzImage

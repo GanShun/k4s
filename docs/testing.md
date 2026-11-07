@@ -36,7 +36,8 @@ selects, e.g. `K4S_RUNC_TESTS='TestInitJoinPID'`; the default is the whole packa
 increasing cost. `test-runc` is not in it: the other three ask what the *node image*
 can do, and it runs another project's suite against one runc build. From a fresh
 checkout that is the whole story — `make linux` clones the kernel checkout
-and `DIT` fetches everything else. The legs themselves are roughly 2 minutes for
+(pinned to the `linux-7.3.y` stable branch, from `git.kernel.org`) and `DIT`
+fetches everything else. The legs themselves are roughly 2 minutes for
 `make test`, 75 seconds for two flannel boots and 210 seconds for two Cilium boots,
 whose agent has to install itself before the node can become Ready at all. A whole
 `make test-all` from a warm tree measures 545 s; the difference is the kernel and

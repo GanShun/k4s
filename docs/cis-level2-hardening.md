@@ -871,7 +871,7 @@ requirement; those entries do not duplicate it.
 
 **Requires.** `kernel.randomize_va_space = 2`.
 **Status.** `comply` — **(inferred)** from the kernel's compiled default.
-**Evidence (inferred).** `linux/mm/memory.c:121-125`: `randomize_va_space` is initialised to `1` under `CONFIG_COMPAT_BRK` and to `2` otherwise; `# CONFIG_COMPAT_BRK is not set` in the resolved config. `CONFIG_PROC_SYSCTL=y` (`configs/k4s-tiny.config:41`) exposes the knob, and nothing writes it. A boot would settle it; the source and config together are strong.
+**Evidence (inferred).** `linux/mm/memory.c:121-125`: `randomize_va_space` is initialised to `1` under `CONFIG_COMPAT_BRK` and to `2` otherwise; `# CONFIG_COMPAT_BRK is not set` in the resolved config. `CONFIG_SYSCTL=y` exposes the knob, and nothing writes it. A boot would settle it; the source and config together are strong.
 **Cost.** none. Note `CONFIG_RANDOMIZE_BASE` is *not* set, so the *kernel* image is not KASLR'd; this control is about userspace and is satisfied.
 
 #### 1.5.4 Ensure prelink is disabled — `L1`, scored
@@ -1275,8 +1275,8 @@ entries below rather than a guess.
 There is no sysctl configuration in this repository or image: no `/etc/sysctl.conf`,
 no `/etc/sysctl.d`, and no write to `/proc/sys` in `cmd/uinit/main.go`. Every
 control in §3.1–3.2 therefore reflects a **compiled kernel default**, quoted from
-the kernel source in `linux/`. `CONFIG_PROC_SYSCTL=y`
-(`configs/k4s-tiny.config:41`) means each of them is one `write()` away from
+the kernel source in `linux/`. `CONFIG_SYSCTL=y`
+(`configs/k4s-tiny.config:47`) means each of them is one `write()` away from
 being fixed — `uinit` already has the helper (`cmd/uinit/main.go:335`).
 
 #### 3.1.1 Ensure IP forwarding is disabled — `L1`, scored
