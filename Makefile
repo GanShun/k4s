@@ -44,7 +44,7 @@ QEMU_ARGS  := -M q35 -m 1024 -smp 2 $(QEMU_ACCEL) \
               -kernel $(KERNEL) -initrd $(IMAGE) \
               -append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" -no-reboot
 
-.PHONY: all linux image kernel run test test-cluster test-cluster-cni test-all \
+.PHONY: all linux image kernel run test test-cluster test-cluster-cni test-runc test-all \
         check-pahole clean distclean
 
 all: image
@@ -110,6 +110,20 @@ test: kernel $(IMAGE)
 # flannel is the default CNI; test-cluster-cni runs the same test with Cilium.
 test-cluster: kernel $(IMAGE)
 	scripts/test-cluster.sh $(KERNEL) $(IMAGE)
+
+# runc's own suite, in the guest. It needs root and CAP_SYS_ADMIN, which CI
+# cannot give it (runc issue #4) and this node has; the suite is cross-compiled
+# and the fixture injected, so this is the only route to a real result for runc
+# #1 and #3.
+#
+# K4S_RUNC_TESTS is a Go -test.run regex, e.g. K4S_RUNC_TESTS='TestExecIn$|TestPIDHost'.
+# $(value ...) is not decoration: a plain $(K4S_RUNC_TESTS) is expanded by make, so
+# the $ in "$|" -- the order-only-prerequisites automatic variable -- disappears
+# and the selector silently matches nothing. A selector containing a single quote
+# still breaks the guest script; not worth handling for a test filter.
+K4S_RUNC_TESTS ?= .
+test-runc: kernel $(IMAGE)
+	scripts/test-runc.sh $(KERNEL) $(IMAGE) '$(value K4S_RUNC_TESTS)'
 
 # Cilium needs helm (HELM=... to point at one that is not on PATH) to render its
 # chart, and it needs more RAM than flannel does. The node is strictly RAM-only,

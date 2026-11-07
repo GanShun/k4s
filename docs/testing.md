@@ -4,7 +4,7 @@ This is the state of the tests as they stand, including the parts that were
 expensive to learn and are easy to undo by accident. `docs/roadmap.md` has the
 milestones; `docs/cilium.md` has the Cilium evaluation in full.
 
-## The two tests
+## The three tests
 
 **`make test`** — the capability check. Boots the image headless under QEMU and
 runs `scripts/guest-check.sh` inside it over ssh, reading the verdicts from that
@@ -24,7 +24,17 @@ Cilium's chart with `helm template` and applies that instead. One kernel runs
 either: `make kernel` applies both fragments, so the two cluster tests differ only
 in what they install on the node.
 
-**`make test-all`** runs all three, in order of increasing cost. From a fresh
+**`make test-runc`** — runc's own `libcontainer/integration` suite, inside the
+node. It is the suite that checks the fork's claims against a real container, and
+it needs root: namespaces, cgroups, mounts, seccomp, `runc exec`. The shared CI
+runner cannot run it — runc's `libcontainer-integration` job probes for
+`CAP_SYS_ADMIN` and reports it missing (runc issue #4, measured on pipeline 588) —
+so a node that boots as root is the only place it runs at all. `K4S_RUNC_TESTS`
+selects, e.g. `K4S_RUNC_TESTS='TestInitJoinPID'`; the default is the whole package.
+
+**`make test-all`** runs `test`, `test-cluster` and `test-cluster-cni`, in order of
+increasing cost. `test-runc` is not in it: the other three ask what the *node image*
+can do, and it runs another project's suite against one runc build. From a fresh
 checkout that is the whole story — `make linux` clones the kernel checkout
 and `DIT` fetches everything else. The legs themselves are roughly 2 minutes for
 `make test`, 75 seconds for two flannel boots and 210 seconds for two Cilium boots,
