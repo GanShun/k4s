@@ -1,0 +1,244 @@
+# id	level	scored	title
+# Derived inventory of control identifiers, levels and titles from the
+# CIS Distribution Independent Linux Benchmark v2.0.0 (2019-07-16).
+# See SOURCES.md. Body text of the benchmark is deliberately not reproduced.
+# level = the control's applicability in the Level 2 - Server profile:
+#   1 = Level 1 - Server item (also required by Level 2), 2 = Level 2 - Server item.
+# scored = S (Scored) / N (Not Scored), as printed by the benchmark.
+1.1.1.1	1	S	Ensure mounting of cramfs filesystems is disabled
+1.1.1.2	1	S	Ensure mounting of freevxfs filesystems is disabled
+1.1.1.3	1	S	Ensure mounting of jffs2 filesystems is disabled
+1.1.1.4	1	S	Ensure mounting of hfs filesystems is disabled
+1.1.1.5	1	S	Ensure mounting of hfsplus filesystems is disabled
+1.1.1.6	1	S	Ensure mounting of squashfs filesystems is disabled
+1.1.1.7	1	S	Ensure mounting of udf filesystems is disabled
+1.1.1.8	2	N	Ensure mounting of FAT filesystems is limited
+1.1.2	1	S	Ensure /tmp is configured
+1.1.3	1	S	Ensure nodev option set on /tmp partition
+1.1.4	1	S	Ensure nosuid option set on /tmp partition
+1.1.5	1	S	Ensure noexec option set on /tmp partition
+1.1.6	2	S	Ensure separate partition exists for /var
+1.1.7	2	S	Ensure separate partition exists for /var/tmp
+1.1.8	1	S	Ensure nodev option set on /var/tmp partition
+1.1.9	1	S	Ensure nosuid option set on /var/tmp partition
+1.1.10	1	S	Ensure noexec option set on /var/tmp partition
+1.1.11	2	S	Ensure separate partition exists for /var/log
+1.1.12	2	S	Ensure separate partition exists for /var/log/audit
+1.1.13	2	S	Ensure separate partition exists for /home
+1.1.14	1	S	Ensure nodev option set on /home partition
+1.1.15	1	S	Ensure nodev option set on /dev/shm partition
+1.1.16	1	S	Ensure nosuid option set on /dev/shm partition
+1.1.17	1	S	Ensure noexec option set on /dev/shm partition
+1.1.18	1	N	Ensure nodev option set on removable media partitions
+1.1.19	1	N	Ensure nosuid option set on removable media partitions
+1.1.20	1	N	Ensure noexec option set on removable media partitions
+1.1.21	1	S	Ensure sticky bit is set on all world-writable directories
+1.1.22	1	S	Disable Automounting
+1.1.23	1	S	Disable USB Storage
+1.2.1	1	N	Ensure package manager repositories are configured
+1.2.2	1	N	Ensure GPG keys are configured
+1.3.1	1	S	Ensure AIDE is installed
+1.3.2	1	S	Ensure filesystem integrity is regularly checked
+1.4.1	1	S	Ensure permissions on bootloader config are configured
+1.4.2	1	S	Ensure bootloader password is set
+1.4.3	1	S	Ensure authentication required for single user mode
+1.4.4	1	N	Ensure interactive boot is not enabled
+1.5.1	1	S	Ensure core dumps are restricted
+1.5.2	1	S	Ensure XD/NX support is enabled
+1.5.3	1	S	Ensure address space layout randomization (ASLR) is enabled
+1.5.4	1	S	Ensure prelink is disabled
+1.6.1.1	2	S	Ensure SELinux or AppArmor are installed
+1.6.2.1	2	S	Ensure SELinux is not disabled in bootloader configuration
+1.6.2.2	2	S	Ensure the SELinux state is enforcing
+1.6.2.3	2	S	Ensure SELinux policy is configured
+1.6.2.4	2	S	Ensure SETroubleshoot is not installed
+1.6.2.5	2	S	Ensure the MCS Translation Service (mcstrans) is not installed
+1.6.2.6	2	S	Ensure no unconfined daemons exist
+1.6.3.1	2	S	Ensure AppArmor is not disabled in bootloader configuration
+1.6.3.2	2	S	Ensure all AppArmor Profiles are enforcing
+1.7.1.1	1	S	Ensure message of the day is configured properly
+1.7.1.2	1	S	Ensure local login warning banner is configured properly
+1.7.1.3	1	S	Ensure remote login warning banner is configured properly
+1.7.1.4	1	S	Ensure permissions on /etc/motd are configured
+1.7.1.5	1	S	Ensure permissions on /etc/issue are configured
+1.7.1.6	1	S	Ensure permissions on /etc/issue.net are configured
+1.7.2	1	S	Ensure GDM login banner is configured
+1.8	1	N	Ensure updates, patches, and additional security software are installed
+2.1.1	1	S	Ensure chargen services are not enabled
+2.1.2	1	S	Ensure daytime services are not enabled
+2.1.3	1	S	Ensure discard services are not enabled
+2.1.4	1	S	Ensure echo services are not enabled
+2.1.5	1	S	Ensure time services are not enabled
+2.1.6	1	S	Ensure rsh server is not enabled
+2.1.7	1	S	Ensure talk server is not enabled
+2.1.8	1	S	Ensure telnet server is not enabled
+2.1.9	1	S	Ensure tftp server is not enabled
+2.1.10	1	S	Ensure xinetd is not enabled
+2.2.1.1	1	N	Ensure time synchronization is in use
+2.2.1.2	1	S	Ensure ntp is configured
+2.2.1.3	1	S	Ensure chrony is configured
+2.2.1.4	1	S	Ensure systemd-timesyncd is configured
+2.2.2	1	S	Ensure X Window System is not installed
+2.2.3	1	S	Ensure Avahi Server is not enabled
+2.2.4	1	S	Ensure CUPS is not enabled
+2.2.5	1	S	Ensure DHCP Server is not enabled
+2.2.6	1	S	Ensure LDAP server is not enabled
+2.2.7	1	S	Ensure NFS and RPC are not enabled
+2.2.8	1	S	Ensure DNS Server is not enabled
+2.2.9	1	S	Ensure FTP Server is not enabled
+2.2.10	1	S	Ensure HTTP server is not enabled
+2.2.11	1	S	Ensure IMAP and POP3 server is not enabled
+2.2.12	1	S	Ensure Samba is not enabled
+2.2.13	1	S	Ensure HTTP Proxy Server is not enabled
+2.2.14	1	S	Ensure SNMP Server is not enabled
+2.2.15	1	S	Ensure mail transfer agent is configured for local-only mode
+2.2.16	1	S	Ensure rsync service is not enabled
+2.2.17	1	S	Ensure NIS Server is not enabled
+2.3.1	1	S	Ensure NIS Client is not installed
+2.3.2	1	S	Ensure rsh client is not installed
+2.3.3	1	S	Ensure talk client is not installed
+2.3.4	1	S	Ensure telnet client is not installed
+2.3.5	1	S	Ensure LDAP client is not installed
+3.1.1	1	S	Ensure IP forwarding is disabled
+3.1.2	1	S	Ensure packet redirect sending is disabled
+3.2.1	1	S	Ensure source routed packets are not accepted
+3.2.2	1	S	Ensure ICMP redirects are not accepted
+3.2.3	1	S	Ensure secure ICMP redirects are not accepted
+3.2.4	1	S	Ensure suspicious packets are logged
+3.2.5	1	S	Ensure broadcast ICMP requests are ignored
+3.2.6	1	S	Ensure bogus ICMP responses are ignored
+3.2.7	1	S	Ensure Reverse Path Filtering is enabled
+3.2.8	1	S	Ensure TCP SYN Cookies is enabled
+3.2.9	1	S	Ensure IPv6 router advertisements are not accepted
+3.3.1	1	N	Ensure TCP Wrappers is installed
+3.3.2	1	N	Ensure /etc/hosts.allow is configured
+3.3.3	1	N	Ensure /etc/hosts.deny is configured
+3.3.4	1	S	Ensure permissions on /etc/hosts.allow are configured
+3.3.5	1	S	Ensure permissions on /etc/hosts.deny are configured
+3.4.1	2	S	Ensure DCCP is disabled
+3.4.2	2	S	Ensure SCTP is disabled
+3.4.3	2	S	Ensure RDS is disabled
+3.4.4	2	S	Ensure TIPC is disabled
+3.5.1.1	1	S	Ensure IPv6 default deny firewall policy
+3.5.1.2	1	S	Ensure IPv6 loopback traffic is configured
+3.5.1.3	1	N	Ensure IPv6 outbound and established connections are configured
+3.5.1.4	1	N	Ensure IPv6 firewall rules exist for all open ports
+3.5.2.1	1	S	Ensure default deny firewall policy
+3.5.2.2	1	S	Ensure loopback traffic is configured
+3.5.2.3	1	N	Ensure outbound and established connections are configured
+3.5.2.4	1	S	Ensure firewall rules exist for all open ports
+3.5.3	1	S	Ensure iptables is installed
+3.6	1	N	Ensure wireless interfaces are disabled
+3.7	2	N	Disable IPv6
+4.1.1.1	2	S	Ensure audit log storage size is configured
+4.1.1.2	2	S	Ensure system is disabled when audit logs are full
+4.1.1.3	2	S	Ensure audit logs are not automatically deleted
+4.1.2	2	S	Ensure auditd is installed
+4.1.3	2	S	Ensure auditd service is enabled
+4.1.4	2	S	Ensure auditing for processes that start prior to auditd is enabled
+4.1.5	2	S	Ensure events that modify date and time information are collected
+4.1.6	2	S	Ensure events that modify user/group information are collected
+4.1.7	2	S	Ensure events that modify the system's network environment are collected
+4.1.8	2	S	Ensure events that modify the system's Mandatory Access Controls are collected
+4.1.9	2	S	Ensure login and logout events are collected
+4.1.10	2	S	Ensure session initiation information is collected
+4.1.11	2	S	Ensure discretionary access control permission modification events are collected
+4.1.12	2	S	Ensure unsuccessful unauthorized file access attempts are collected
+4.1.13	2	S	Ensure use of privileged commands is collected
+4.1.14	2	S	Ensure successful file system mounts are collected
+4.1.15	2	S	Ensure file deletion events by users are collected
+4.1.16	2	S	Ensure changes to system administration scope (sudoers) is collected
+4.1.17	2	S	Ensure system administrator actions (sudolog) are collected
+4.1.18	2	S	Ensure kernel module loading and unloading is collected
+4.1.19	2	S	Ensure the audit configuration is immutable
+4.2.1.1	1	S	Ensure rsyslog is installed
+4.2.1.2	1	S	Ensure rsyslog Service is enabled
+4.2.1.3	1	N	Ensure logging is configured
+4.2.1.4	1	S	Ensure rsyslog default file permissions configured
+4.2.1.5	1	S	Ensure rsyslog is configured to send logs to a remote log host
+4.2.1.6	1	N	Ensure remote rsyslog messages are only accepted on designated log hosts.
+4.2.2.1	1	S	Ensure journald is configured to send logs to rsyslog
+4.2.2.2	1	S	Ensure journald is configured to compress large log files
+4.2.2.3	1	S	Ensure journald is configured to write logfiles to persistent disk
+4.2.3	1	S	Ensure permissions on all logfiles are configured
+4.3	1	N	Ensure logrotate is configured
+5.1.1	1	S	Ensure cron daemon is enabled
+5.1.2	1	S	Ensure permissions on /etc/crontab are configured
+5.1.3	1	S	Ensure permissions on /etc/cron.hourly are configured
+5.1.4	1	S	Ensure permissions on /etc/cron.daily are configured
+5.1.5	1	S	Ensure permissions on /etc/cron.weekly are configured
+5.1.6	1	S	Ensure permissions on /etc/cron.monthly are configured
+5.1.7	1	S	Ensure permissions on /etc/cron.d are configured
+5.1.8	1	S	Ensure at/cron is restricted to authorized users
+5.2.1	1	S	Ensure permissions on /etc/ssh/sshd_config are configured
+5.2.2	1	S	Ensure permissions on SSH private host key files are configured
+5.2.3	1	S	Ensure permissions on SSH public host key files are configured
+5.2.4	1	S	Ensure SSH Protocol is set to 2
+5.2.5	1	S	Ensure SSH LogLevel is appropriate
+5.2.6	2	S	Ensure SSH X11 forwarding is disabled
+5.2.7	1	S	Ensure SSH MaxAuthTries is set to 4 or less
+5.2.8	1	S	Ensure SSH IgnoreRhosts is enabled
+5.2.9	1	S	Ensure SSH HostbasedAuthentication is disabled
+5.2.10	1	S	Ensure SSH root login is disabled
+5.2.11	1	S	Ensure SSH PermitEmptyPasswords is disabled
+5.2.12	1	S	Ensure SSH PermitUserEnvironment is disabled
+5.2.13	1	S	Ensure only strong Ciphers are used
+5.2.14	1	S	Ensure only strong MAC algorithms are used
+5.2.15	1	S	Ensure only strong Key Exchange algorithms are used
+5.2.16	1	S	Ensure SSH Idle Timeout Interval is configured
+5.2.17	1	S	Ensure SSH LoginGraceTime is set to one minute or less
+5.2.18	1	S	Ensure SSH access is limited
+5.2.19	1	S	Ensure SSH warning banner is configured
+5.2.20	1	S	Ensure SSH PAM is enabled
+5.2.21	2	S	Ensure SSH AllowTcpForwarding is disabled
+5.2.22	1	S	Ensure SSH MaxStartups is configured
+5.2.23	1	S	Ensure SSH MaxSessions is set to 4 or less
+5.3.1	1	S	Ensure password creation requirements are configured
+5.3.2	1	N	Ensure lockout for failed password attempts is configured
+5.3.3	1	N	Ensure password reuse is limited
+5.3.4	1	N	Ensure password hashing algorithm is SHA-512
+5.4.1.1	1	S	Ensure password expiration is 365 days or less
+5.4.1.2	1	S	Ensure minimum days between password changes is 7 or more
+5.4.1.3	1	S	Ensure password expiration warning days is 7 or more
+5.4.1.4	1	S	Ensure inactive password lock is 30 days or less
+5.4.1.5	1	S	Ensure all users last password change date is in the past
+5.4.2	1	S	Ensure system accounts are secured
+5.4.3	1	S	Ensure default group for the root account is GID 0
+5.4.4	1	S	Ensure default user umask is 027 or more restrictive
+5.4.5	2	S	Ensure default user shell timeout is 900 seconds or less
+5.5	1	N	Ensure root login is restricted to system console
+5.6	1	S	Ensure access to the su command is restricted
+6.1.1	2	N	Audit system file permissions
+6.1.2	1	S	Ensure permissions on /etc/passwd are configured
+6.1.3	1	S	Ensure permissions on /etc/shadow are configured
+6.1.4	1	S	Ensure permissions on /etc/group are configured
+6.1.5	1	S	Ensure permissions on /etc/gshadow are configured
+6.1.6	1	S	Ensure permissions on /etc/passwd- are configured
+6.1.7	1	S	Ensure permissions on /etc/shadow- are configured
+6.1.8	1	S	Ensure permissions on /etc/group- are configured
+6.1.9	1	S	Ensure permissions on /etc/gshadow- are configured
+6.1.10	1	S	Ensure no world writable files exist
+6.1.11	1	S	Ensure no unowned files or directories exist
+6.1.12	1	S	Ensure no ungrouped files or directories exist
+6.1.13	1	N	Audit SUID executables
+6.1.14	1	N	Audit SGID executables
+6.2.1	1	S	Ensure password fields are not empty
+6.2.2	1	S	Ensure no legacy "+" entries exist in /etc/passwd
+6.2.3	1	S	Ensure no legacy "+" entries exist in /etc/shadow
+6.2.4	1	S	Ensure no legacy "+" entries exist in /etc/group
+6.2.5	1	S	Ensure root is the only UID 0 account
+6.2.6	1	S	Ensure root PATH Integrity
+6.2.7	1	S	Ensure all users' home directories exist
+6.2.8	1	S	Ensure users' home directories permissions are 750 or more restrictive
+6.2.9	1	S	Ensure users own their home directories
+6.2.10	1	S	Ensure users' dot files are not group or world writable
+6.2.11	1	S	Ensure no users have .forward files
+6.2.12	1	S	Ensure no users have .netrc files
+6.2.13	1	S	Ensure users' .netrc Files are not group or world accessible
+6.2.14	1	S	Ensure no users have .rhosts files
+6.2.15	1	S	Ensure all groups in /etc/passwd exist in /etc/group
+6.2.16	1	S	Ensure no duplicate UIDs exist
+6.2.17	1	S	Ensure no duplicate GIDs exist
+6.2.18	1	S	Ensure no duplicate user names exist
+6.2.19	1	S	Ensure no duplicate group names exist
+6.2.20	1	S	Ensure shadow group is empty

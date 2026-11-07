@@ -420,6 +420,12 @@ design and the line pins, and the fork's `ROADMAP.md` (on its `roadmap` branch)
 - Weights streamed over the network into RAM/VRAM; measure boot time.
 - Acceptance: a diskless GPU node runs a llama.cpp/vLLM pod and survives a
   reboot.
+- What each of those costs, which driver option survives an image we build
+  ourselves, and the order to close the gaps in: `docs/gpu.md`.
+- Settled there: the driver is the **open kernel modules**, built from source
+  against our kernel at image-build time (MIT/GPL-2.0, and it keeps GPUDirect
+  Storage and HMM), for **Turing or later** GPUs only. The proprietary flavour
+  builds too but is not this project's path.
 
 ## kubelet spike
 
