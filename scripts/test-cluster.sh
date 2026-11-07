@@ -112,7 +112,11 @@ CILIUM_YAML=$CP/cilium.yaml
 ACCEL=()
 [ -w /dev/kvm ] && ACCEL=(-enable-kvm -cpu host)
 
-mkdir -p "$CP" "$NODEDIR"
+mkdir -p "$CP" "$NODEDIR" "$CP/diag"
+# Transport retries for the whole run, in their own file and cleared exactly once:
+# waits.log is cleared per boot and again in collect, so a retry from the run phase
+# was erased before anyone could read it, and only the last boot's survived.
+: > "$CP/diag/ssh-retries.log"
 
 # One instance at a time. Two would fight over the port forward and over the
 # node VM's console log -- worse, each one's cp_down kills any control plane VM it
@@ -532,6 +536,10 @@ boot() {
 # simply waits for termination.
 stop_guest() {
 	local pid
+	# Close the multiplexed connection before the VM goes, or the master sits on a
+	# socket for a guest that no longer exists and the next boot's first call
+	# inherits it. A long ControlPersist would expire it eventually; this is immediate.
+	ssh -o ControlPath="$CP/ssh-ctl-$SSH_PORT" -O exit root@127.0.0.1 2>/dev/null || true
 	pid=$(cat "$CP/qemu.pid" 2>/dev/null || true)
 	[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
 	local i
@@ -561,24 +569,62 @@ stop_guest() {
 # to *handle* a failure is defeated by the option that makes failures fatal. An ERR
 # trap is likewise not inherited by shell functions without `set -E`.
 guest_get() {
-	local out rc
-	if out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
-		-o UserKnownHostsFile=/dev/null -o BatchMode=yes \
-		-o ConnectTimeout=5 -i "$SSH/client" -p "$SSH_PORT" \
-		root@127.0.0.1 "$@" 2>&1); then
-		rc=0
-	else
-		rc=$?
-	fi
+	local out rc attempt
+	# Every verdict in this harness is read through here while the guest is up, so a
+	# transport failure is written into a marker and then reported as a failed check.
+	# Measured: 6 of 20 Cilium runs had that happen at least once.
+	#
+	# Two changes, and they are different: multiplex so a boot makes one connection
+	# instead of dozens (u-root's sshd does not obviously tolerate the rate), and
+	# retry the *connection* once, never the command -- retrying a command that
+	# legitimately failed would hide a real defect behind a slow one.
+	for attempt in 1 2; do
+		if out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
+			-o UserKnownHostsFile=/dev/null -o BatchMode=yes \
+			-o ConnectTimeout=5 -o ControlMaster=auto \
+			-o ControlPath="$CP/ssh-ctl-%p" -o ControlPersist=300 \
+			-i "$SSH/client" -p "$SSH_PORT" \
+			root@127.0.0.1 "$@" 2>&1); then
+			rc=0
+			break
+		else
+			rc=$?
+		fi
+		# 255 is ssh's own failure: it never reached the command. Anything else came
+		# back from the guest and is a real result.
+		#
+		# Measured once the count was collected properly: three retries per run, at
+		# the call after the largest read (~206 KB of cilium-agent.log), inside the
+		# tight `ls /etc/cni/net.d` polling loop, and once more on the next boot. So
+		# both a large transfer and a burst of connections are implicated, and neither
+		# is established as the cause; ControlPersist 10s vs 300s changed nothing.
+		#
+		# The retry is kept because it makes every run green, and the residue is
+		# k4s#4 rather than a mystery: the session dying is a property of the node's
+		# sshd (u-root's, not OpenSSH), of the transfer size, or of the connection
+		# rate. The count is logged and printed on every run because an earlier
+		# version logged to a file that was cleared twice per boot, and then "one
+		# retry per run" looked true when the real number was three.
+		[ "$rc" = 255 ] || break
+		# A retry that succeeds leaves no other trace, and then "no failures" cannot
+		# be told apart from "it still fails as often and the retry absorbs it". Both
+		# look identical in the output, and they need different follow-ups.
+		if [ "$attempt" = 1 ]; then
+			mkdir -p "$CP/diag" 2>/dev/null || true
+			printf '%s ssh retry (rc=255): %s\n' "$(date +%T)" "$*" \
+				>> "$CP/diag/ssh-retries.log" 2>/dev/null || true
+			sleep 1
+		fi
+	done
 	if [ "$rc" = 124 ]; then
 		printf '(ssh to the node timed out)\n'
 		return 0
 	fi
 	if [ "$rc" != 0 ]; then
 		if [ -n "$out" ]; then
-			printf '(ssh to the node failed, rc=%s: %s)\n' "$rc" "$out"
+			printf '(ssh to the node failed, rc=%s, on attempt %s: %s)\n' "$rc" "$attempt" "$out"
 		else
-			printf '(ssh to the node failed, rc=%s, and said nothing)\n' "$rc"
+			printf '(ssh to the node failed, rc=%s, said nothing, on attempt %s)\n' "$rc" "$attempt"
 		fi
 		return 0
 	fi
@@ -743,6 +789,8 @@ diag() {
 	echo "  --- markers ---" >&2
 	echo "  --- how the waits went ---" >&2
 	cat "$CP/diag/waits.log" 2>/dev/null | tail -25 | sed 's/^/  /' >&2
+	echo "  --- ssh retries this run ---" >&2
+	cat "$CP/diag/ssh-retries.log" 2>/dev/null | tail -10 | sed 's/^/  /' >&2
 	for m in smoke netns ds deploy hook pidns; do
 		printf '  %-7s %s\n' "$m" \
 			"$(guest_get "cat /var/log/k4s-$m/result 2>/dev/null" | tr '\n' ' ')" >&2
@@ -1531,5 +1579,13 @@ for n in $(seq 2 "$BOOTS"); do
 done
 
 echo
+# Unconditional, and on its own line: the point of counting retries is to tell
+# "the transport is fine" from "it fails once per run and the retry absorbs it" on a
+# run that otherwise passes. diag() only exists for the failing case.
+# grep -c prints 0 *and* exits 1 when there is nothing to count, so `|| echo 0`
+# used to give "ssh retries: 0" followed by a bare "0" -- on exactly the run whose
+# zero is the interesting one.
+n=$(grep -c 'ssh retry' "$CP/diag/ssh-retries.log" 2>/dev/null) || true
+printf 'ssh retries: %s\n' "${n:-0}"
 echo "cluster: ok"
 echo "the control plane VM is killed on exit; its console log is $CP/controlplane.log"
