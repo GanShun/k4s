@@ -1,0 +1,84 @@
+# The regression test for a container init joining a PID namespace by path.
+#
+# `shareProcessNamespace` gives every container in the pod the sandbox's PID
+# namespace rather than one of its own, and kubelet asks for that by handing the
+# runtime a namespace *path* to join. Until the cgo-free runc could stage a join
+# (runc #1, `runcns` + `stageInitNs`) a pod like this one failed to start at all
+# with "container init is not in the expected PID namespace", which is what makes
+# it worth a verdict line rather than a unit test.
+#
+# The assertion is written by the guest, not read off a console:
+#
+#   * `watcher` looks for `sleeper`'s process in /proc, and can only find it if
+#     the two share one PID namespace -- each container's /proc is a procfs mount
+#     for the namespace its own init is in.
+#   * both write the inode of the namespace they are in, and the harness compares
+#     them. Finding the process already implies it, so the comparison is there to
+#     say *which* namespace rather than only that they agree; it also catches the
+#     case where kubelet's request was ignored and both containers were put in the
+#     host's namespace together.
+#
+# hostNetwork, like smoke-pod.yaml and hook-pod.yaml, so that a broken CNI cannot
+# be mistaken for a broken join.
+#
+# The peer is identified by its exact argv, not by a substring: the watcher's own
+# command line contains whatever text it searches for, so a substring match found
+# the watcher itself and wrote the marker whether or not the namespace was
+# shared. Measured: with shareProcessNamespace removed, the first version
+# reported the watcher's and the peer's namespace as one inode while the
+# sleeper's was different -- only possible if the peer was the watcher.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-pidns
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  hostNetwork: true
+  # Always, not Never: the node is diskless, so a reboot wipes the containers
+  # kubelet knew about, and this pod has to come back and prove the join again.
+  restartPolicy: Always
+  shareProcessNamespace: true
+  containers:
+    - name: sleeper
+      image: docker.io/library/busybox:1.36
+      command:
+        - "sh"
+        - "-c"
+        - >-
+          readlink /proc/self/ns/pid > /out/sleeper-ns;
+          exec sleep 3601
+      volumeMounts:
+        - name: out
+          mountPath: /out
+    - name: watcher
+      image: docker.io/library/busybox:1.36
+      command:
+        - "sh"
+        - "-c"
+        - >-
+          i=0;
+          while [ "$i" -lt 120 ]; do
+            for d in /proc/[0-9]*; do
+              [ -r "$d/cmdline" ] || continue;
+              set -- $(tr '\0' ' ' < "$d/cmdline" 2>/dev/null);
+              [ "$1" = sleep ] && [ "$2" = 3601 ] || continue;
+              echo K4S_PIDNS_OK > /out/result;
+              readlink /proc/self/ns/pid > /out/watcher-ns;
+              readlink "$d/ns/pid" > /out/peer-ns;
+              tr '\0' ' ' < "$d/cmdline" > /out/peer-cmdline;
+              exec sleep 3602;
+            done;
+            i=$((i+1));
+            sleep 1;
+          done;
+          echo K4S_PIDNS_NO_PEER > /out/result;
+          exec sleep 3602
+      volumeMounts:
+        - name: out
+          mountPath: /out
+  volumes:
+    - name: out
+      hostPath:
+        path: /var/log/k4s-pidns
+        type: DirectoryOrCreate

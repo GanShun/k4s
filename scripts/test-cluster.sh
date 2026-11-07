@@ -19,6 +19,8 @@
 #   5d. apply a pod whose postStart hook is a `runc exec`, and check the hook ran
 #      in the container's own PID namespace -- the regression test for the exec
 #      staging in runc's `runcns` subcommand
+#   5e. apply a shareProcessNamespace pod, and check one container saw the
+#       other's process (a PID namespace joined by path)
 #   6. boot it again, unchanged, and check it rejoins and everything returns
 #
 # The control plane is a VM rather than host processes because a node should
@@ -89,6 +91,7 @@ NGINX_POD=$EXAMPLES/nginx-pod.yaml
 DS=$EXAMPLES/ds-pod.yaml
 LOGPOD=$EXAMPLES/log-pod.yaml
 HOOK_POD=$EXAMPLES/hook-pod.yaml
+PIDNS_POD=$EXAMPLES/pidns-pod.yaml
 FLANNEL_DS=$EXAMPLES/flannel-ds.yaml
 DEPLOY=$EXAMPLES/deploy-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
@@ -462,6 +465,13 @@ splice_image() {
 boot() {
 	local n=$1
 	log "booting the node image (run $n/$BOOTS)"
+	# Cleared here as well as in collect: diag is called by failures that happen
+	# before collect runs -- a node that never registers, a pod that never starts, a
+	# failing pull -- and on the second boot it would otherwise print the first
+	# boot's markers as this boot's evidence. collect clears them for the same
+	# reason, one boot later.
+	rm -f "$CP/markers"/*
+	rm -f "$CP/diag/waits.log"
 	# Nothing is fed to this guest. The node brings itself up: u-root's init runs
 	# /bin/uinit, a Go program built from cmd/uinit, which brings up the network,
 	# sshd, the mounts and cgroups, containerd and kubelet. The console is still
@@ -567,6 +577,12 @@ wait_marker() {
 		if grep -q "$want" "$out"; then
 			return 0
 		fi
+		# Recorded per attempt, with a timestamp: a node that cannot be reached
+		# and a marker that was never written are different defects and look
+		# alike in $out otherwise.
+		printf '%s %s: no %s in %s\n' \
+			"$(date +%H:%M:%S)" "$guest_path" "$want" \
+			"$(head -c 80 "$out" | tr '\n' ' ')" >> "$CP/diag/waits.log"
 		sleep 2
 	done
 	return 0
@@ -593,15 +609,20 @@ collect() {
 	local d=$CP/diag m
 	mkdir -p "$d" "$CP/markers"
 	# Cleared, not merely created: a marker left by an earlier run would otherwise
-	# let a check pass on evidence this run did not produce.
+	# let a check pass on evidence this run did not produce. boot() clears them too,
+	# for the failures that call diag before this runs.
 	rm -f "$CP/markers"/*
-	for m in smoke netns ds deploy hook; do
+	# For the same reason: a wait recorded by an earlier boot or an earlier run
+	# is not this run's evidence, and diag tails this file.
+	rm -f "$CP/diag/waits.log"
+	for m in smoke netns ds deploy hook pidns; do
 		case $m in
 			smoke)  want=K4S_POD_OK ;;
 			netns)  want=K4S_NETNS_OK ;;
 			ds)     want=K4S_DS_OK ;;
 			deploy) want=K4S_DEPLOY_OK ;;
 			hook)   want=K4S_HOOK_OK ;;
+			pidns)  want=K4S_PIDNS_OK ;;
 		esac
 		wait_marker "/var/log/k4s-$m/result" "$CP/markers/$m" "$want"
 	done
@@ -613,6 +634,16 @@ collect() {
 	# records the harness's error message here instead of an inode.
 	wait_marker '/var/log/k4s-hook/hook-ns' "$CP/markers/hook-ns" 'pid:\['
 	wait_marker '/var/log/k4s-hook/init-ns' "$CP/markers/init-ns" 'pid:\['
+	# The shared-PID-namespace pod: the watcher container's namespace, the
+	# sleeper's, and the namespace of the sleeper's process as the watcher reads
+	# it through its own /proc. Waiting on content, not on the files existing.
+	wait_marker '/var/log/k4s-pidns/watcher-ns' "$CP/markers/pidns-watcher-ns" 'pid:\['
+	wait_marker '/var/log/k4s-pidns/sleeper-ns' "$CP/markers/pidns-sleeper-ns" 'pid:\['
+	wait_marker '/var/log/k4s-pidns/peer-ns' "$CP/markers/pidns-peer-ns" 'pid:\['
+	# Which process the watcher matched. Fetched here and not in check_marker,
+	# which runs after stop_guest: reading the guest from there can only return an
+	# ssh error, so the field would always be empty or wrong.
+	wait_marker '/var/log/k4s-pidns/peer-cmdline' "$CP/markers/pidns-peer-cmdline" 'sleep'
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
 	# over the pod network instead, which is also the assertion that the pod
@@ -647,7 +678,9 @@ diag() {
 	local d=$CP/diag m
 	mkdir -p "$d"
 	echo "  --- markers ---" >&2
-	for m in smoke netns ds deploy hook; do
+	echo "  --- how the waits went ---" >&2
+	cat "$CP/diag/waits.log" 2>/dev/null | tail -25 | sed 's/^/  /' >&2
+	for m in smoke netns ds deploy hook pidns; do
 		printf '  %-7s %s\n' "$m" \
 			"$(guest_get "cat /var/log/k4s-$m/result 2>/dev/null" | tr '\n' ' ')" >&2
 	done
@@ -655,6 +688,10 @@ diag() {
 	# one, so both are printed rather than just the difference.
 	printf '  hook ns  %s\n' "$(guest_get 'cat /var/log/k4s-hook/hook-ns 2>/dev/null' | tr '\n' ' ')" >&2
 	printf '  init ns  %s\n' "$(guest_get 'cat /var/log/k4s-hook/init-ns 2>/dev/null' | tr '\n' ' ')" >&2
+	printf '  pidns    watcher %s sleeper %s peer %s\n' \
+		"$(cat "$CP/markers/pidns-watcher-ns" 2>/dev/null | tr '\n' ' ')" \
+		"$(cat "$CP/markers/pidns-sleeper-ns" 2>/dev/null | tr '\n' ' ')" \
+		"$(cat "$CP/markers/pidns-peer-ns" 2>/dev/null | tr '\n' ' ')" >&2
 	echo "  --- is the node's containerd still alive? ---" >&2
 	guest_get 'ctr version' | sed 's/^/  /' >&2
 	guest_get 'ls -la /tmp' | sed 's/^/  /' >&2
@@ -664,6 +701,8 @@ diag() {
 	guest_get 'cat /var/run/cilium/cilium-cni.log 2>&1 | tail -n 15' | sed 's/^/  /' >&2
 	echo "  --- kubelet, the netns pod ---" >&2
 	guest_get 'grep k4s-netns /tmp/kubelet.log | tail -n 10' | sed 's/^/  /' >&2
+	echo "  --- kubelet, the pidns pod ---" >&2
+	guest_get 'grep k4s-pidns /tmp/kubelet.log | tail -n 20' | sed 's/^/  /' >&2
 	echo "  --- kubelet, last 12 ---" >&2
 	guest_get 'tail -n 12 /tmp/kubelet.log' | sed 's/^/  /' >&2
 	echo "  --- containerd, cni ---" >&2
@@ -954,6 +993,28 @@ run_hook() {
 	return 1
 }
 
+# The shareProcessNamespace pod. Its containers share the sandbox's PID
+# namespace, which kubelet asks for by handing the runtime a namespace *path*:
+# the one shape a cgo-free runc could not start at all before it could stage a
+# join. Both containers are in it, so this waits for the pod rather than for a
+# container, and the verdict is the marker plus the namespace comparison.
+run_pidns() {
+	log "applying the shareProcessNamespace pod"
+	reapply "$PIDNS_POD"
+	local i ph
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-pidns -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			echo "pidns pod phase: Running"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "pidns pod: did not reach Running" >&2
+	K describe pod k4s-pidns 2>&1 | tail -30 | sed 's/^/  /' >&2
+	return 1
+}
+
 # The DaemonSet controller and the scheduler both live in the control plane VM,
 # so these only become ready if it is doing its job: the DaemonSet controller
 # assigns its own node, and nothing pins the Deployment, so it needs the
@@ -1070,6 +1131,38 @@ check_marker() {
 	echo "log pod: ok (the pod's stdout reached /var/log/pods)"
 	echo "nginx: ok (the node fetched stock nginx's page over the pod network)"
 	echo "hook: ok (postStart ran, in the container's PID namespace)"
+	# `shareProcessNamespace`: the runtime was given a PID namespace by *path* and
+	# had to stage the init into it. Without that the pod never starts, so the
+	# marker is the first assertion and it is reached only if the join happened.
+	#
+	# The three namespace files are each required to hold an inode before they are
+	# compared: a harness that could not read them leaves them empty, and empty
+	# equals empty, which would pass this check on no evidence at all. They are
+	# fetched in collect, before stop_guest, for the same reason.
+	if ! grep -q 'K4S_PIDNS_OK' "$m/pidns" 2>/dev/null; then
+		echo "pidns: FAILED (one container could not see the other's process)" >&2
+		sed 's/^/  /' "$m/pidns" 2>/dev/null >&2
+		printf '  matched: %s\n' "$(cat "$m/pidns-peer-cmdline" 2>/dev/null)" >&2
+		echo "  cause: a shareProcessNamespace pod gives the runtime a PID" >&2
+		echo "  namespace path to join; see runc #1 and its runcns staging" >&2
+		return 1
+	fi
+	for ns in pidns-watcher-ns pidns-sleeper-ns pidns-peer-ns; do
+		if ! grep -q 'pid:\[' "$m/$ns" 2>/dev/null; then
+			echo "pidns: FAILED ($ns does not hold a PID namespace)" >&2
+			sed 's/^/  /' "$m/$ns" 2>/dev/null >&2
+			return 1
+		fi
+	done
+	if [ "$(cat "$m/pidns-watcher-ns")" != "$(cat "$m/pidns-sleeper-ns")" ] ||
+		[ "$(cat "$m/pidns-watcher-ns")" != "$(cat "$m/pidns-peer-ns")" ]; then
+		echo "pidns: FAILED (the two containers are not in one PID namespace)" >&2
+		printf '  watcher: %s\n  sleeper: %s\n  peer:    %s\n' \
+			"$(cat "$m/pidns-watcher-ns")" "$(cat "$m/pidns-sleeper-ns")" \
+			"$(cat "$m/pidns-peer-ns")" >&2
+		return 1
+	fi
+	echo "pidns: ok (shareProcessNamespace pod: one container saw the other)"
 	return 0
 }
 
@@ -1124,6 +1217,7 @@ run_nginx
 run_workloads
 run_log_pod
 run_hook
+run_pidns
 collect
 stop_guest
 check_marker
@@ -1154,6 +1248,7 @@ for n in $(seq 2 "$BOOTS"); do
 	run_nginx
 	run_workloads
 	run_hook
+	run_pidns
 	collect
 	stop_guest
 	check_marker
