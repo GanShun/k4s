@@ -375,11 +375,18 @@ cp_up() {
 	# and the node reach the apiserver: the host at 127.0.0.1:6443, and the node
 	# at 10.0.2.2:6443, which is the host from inside the node's user-mode
 	# network.
+	#
+	# tsc=unstable is in both command lines and is not optional on this host: the
+	# guest's TSC is skewed under KVM, the kernel marks it unstable partway through
+	# boot, and the guest wedges at that moment -- ssh then refuses connections and
+	# every marker read fails. It is a property of the test VM, not of the node, so
+	# it belongs here and not in configs/; scripts/lib/boot.sh carries the same flag
+	# with the same reason.
 	qemu-system-x86_64 -M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:$PORT \
 		-device virtio-net-pci,netdev=n0 \
 		-kernel "$KERNEL" -initrd "$CP_IMAGE" \
-		-append "console=ttyS0,115200 panic=-1" \
+		-append "console=ttyS0,115200 panic=-1 tsc=unstable" \
 		-display none -monitor none -serial "file:$CP/controlplane.log" \
 		-no-reboot 2>> "$CP/controlplane.log" &
 	echo $! > "$CP/controlplane.pid"
@@ -465,7 +472,7 @@ boot() {
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:2022 \
 		-device virtio-net-pci,netdev=n0 \
 		-kernel "$KERNEL" -initrd "$NODE_IMAGE" \
-		-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all" \
+		-append "console=ttyS0,115200 panic=-1 cgroup_no_v1=all tsc=unstable" \
 		-display none -monitor none -serial "file:$CP/boot$n.log" \
 		-no-reboot 2>> "$CP/boot$n.log" &
 	echo $! > "$CP/qemu.pid"
