@@ -73,7 +73,15 @@ RUNC_REPO=${RUNC_REPO:-https://github.com/GanShun/runc.git}
 RUNC_REF=${RUNC_REF:-k4s-dev}
 
 KUBERNETES_REPO=https://github.com/kubernetes/kubernetes.git
-KUBERNETES_REF=master
+# A release tag, not master: the second exception to the default-branch rule,
+# after the kernel. kubelet must not be newer than the apiserver it joins, and
+# master is the next minor (v1.38.0-alpha on 2026-11-08), so a master kubelet
+# is outside the supported skew for any released control plane. A tag rather
+# than the release-1.35 branch because it is also what the kubelet reports as
+# its version (the stamp below), and a tag is the only ref that names one.
+# master also grew the control-plane binaries past what the test's control-plane
+# VM could unpack in 1 GiB (scripts/test-cluster.sh, cp_up).
+KUBERNETES_REF=v1.35.10
 
 CNI_REPO=https://github.com/containernetworking/plugins.git
 CNI_REF=main
@@ -150,9 +158,21 @@ mkdir -p build
 	-o ../build/containerd-shim-runc-v2 ./cmd/containerd-shim-runc-v2)
 (cd "$RUNC_DIR" && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -o "$REPO_ROOT/build/runc" .)
 # kubelet is pure Go, but it is one large binary rather than a bb applet.
-# The version stamp keeps the apiserver skew check happy.
+# The version stamp is what the checkout describes itself as: a build outside the
+# release tooling has no version of its own, and the apiserver's skew checks read
+# this. From the checkout, not from KUBERNETES_REF, because clone_pinned reuses an
+# existing checkout as it stands, and an older one would otherwise be stamped with
+# a release it is not. Off a tag, describe gives v1.35.10-3-gabcdef, which says so.
+# A shallow clone of a branch (master, from before the pin) has no tag at all;
+# that checkout is the unsupported-skew build the pin exists to stop.
+KUBELET_VERSION=$(git -C kubernetes describe --tags 2>/dev/null) || {
+	echo "kubernetes/ has no release tag to describe (a clone of a branch?);" \
+		"remove it so DIT clones $KUBERNETES_REF" >&2
+	exit 1
+}
+echo "kubelet version stamp: $KUBELET_VERSION"
 (cd kubernetes && CGO_ENABLED=0 env -u GOARCH -u GOOS go build -mod=vendor \
-	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=v1.35.8" \
+	-ldflags "-s -w -X k8s.io/component-base/version.gitVersion=$KUBELET_VERSION" \
 	-o ../build/kubelet ./cmd/kubelet)
 # The node's own bring-up, cmd/uinit, is a bb applet rather than a -files binary.
 # It does not re-exec itself, so the applet-name problem that keeps runc and the

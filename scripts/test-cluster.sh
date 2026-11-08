@@ -423,7 +423,13 @@ cp_up() {
 	# every marker read fails. It is a property of the test VM, not of the node, so
 	# it belongs here and not in configs/; scripts/lib/boot.sh carries the same flag
 	# with the same reason.
-	qemu-system-x86_64 -M q35 -m 1024 -smp 2 "${ACCEL[@]}" \
+	#
+	# 1536 MiB, because the kernel unpacks the initramfs into RAM while still
+	# holding the archive: about twice the image's size before anything runs. At
+	# 1024 a 334 MiB image (control-plane binaries from kubernetes master)
+	# panicked with "Initramfs unpacking failed: write error"; the pinned
+	# release's image is 293 MiB, and this leaves room for it to grow.
+	qemu-system-x86_64 -M q35 -m 1536 -smp 2 "${ACCEL[@]}" \
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:$PORT \
 		-device virtio-net-pci,netdev=n0 \
 		-kernel "$KERNEL" -initrd "$CP_IMAGE" \

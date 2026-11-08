@@ -215,7 +215,7 @@ kubeadm costs here:
   kube-scheduler, etcd and pause arrive as **images pulled from a registry on every
   run** (~400–500 MiB). Today the 282 MiB of binaries are compiled once from the component checkouts
   source and baked in, and the control plane needs no registry at all.
-- the control plane VM is `-m 1024`, and a RAM-only image store is a tmpfs, which
+- the control plane VM is `-m 1536`, and a RAM-only image store is a tmpfs, which
   defaults to *half* of RAM. It would need roughly 4 GiB.
 
 Neither matters on a large production machine, and neither is a reason to keep the

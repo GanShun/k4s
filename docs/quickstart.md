@@ -27,17 +27,18 @@ RAM).
 | Architecture | x86_64 | | Every VM is `qemu-system-x86_64 -M q35`, and the kernel config is for amd64 |
 | KVM | optional | **`/dev/kvm` writable by your user** (`sudo usermod -aG kvm $USER`, then log in again). On a cloud VM, enable nested virtualisation. | Without KVM, QEMU falls back to TCG, which is much slower. `make test` then needs `K4S_BOOT_TIMEOUT=900`. The cluster tests have **not been measured under TCG**, so treat them as unsupported without KVM. |
 | CPU | 4 | 8 | Each VM is `-smp 2`, a cluster run boots two VMs, and the kernel and Go builds run in parallel |
-| RAM, flannel (`make test-cluster`) | 6 GiB | 8 GiB | The control-plane VM takes 1 GiB and the node 1.5 GiB, plus the host-side build |
+| RAM, flannel (`make test-cluster`) | 6 GiB | 8 GiB | The control-plane VM takes 1.5 GiB and the node 1.5 GiB, plus the host-side build |
 | RAM, Cilium (`make test-cluster-cni`) | 12 GiB | 16 GiB | The node VM needs 6 GiB: its image store is a tmpfs, which gets half of the node's RAM |
-| Disk | 30 GiB free | 50 GiB | Measured: kernel checkout 8.5 GiB, `build/` 4.6 GiB, component checkouts about 1 GiB, Go module cache 4.6 GiB, Go build cache 3.1 GiB, `initramfs.cpio` about 230 MiB |
+| Disk | 25 GiB free | 40 GiB | Measured on a cold start (2026-11-08): about 19 GiB in all. The kernel checkout is 2.1 GiB, `build/` 2.8 GiB, the component checkouts and the image 1.2 GiB, and the Go module and build caches under `$HOME` 12 GiB |
 | Network | outbound HTTPS | | github.com (components), git.kernel.org (the kernel, from the stable tree), proxy.golang.org, docker.io and registry.k8s.io (test images), helm.cilium.io and quay.io (Cilium) |
 | Local ports | | | 6443 (the apiserver forward), 2222 and 2223 (ssh into the node) must be free |
 | Root | **not needed** | | The VMs use QEMU user-mode networking, and nothing is mounted on the host |
 
 ### Software
 
-- **Go 1.27.0 or newer.** containerd `main` and kubernetes `master` declare
-  `go 1.27.0`.
+- **Go 1.27.0 or newer.** containerd `main` declares `go 1.27.0`. A go.dev
+  tarball is enough, and u-root's build warning that it recommends Go 1.25 or
+  1.26 is harmless.
 - On Debian or Ubuntu:
 
   ```
@@ -68,15 +69,21 @@ which runs `DIT`), then runs three tests one after another:
 | Target | What it proves | Verdict lines |
 | --- | --- | --- |
 | `make test` | the node boots, has the capabilities it needs, and runs a container | `boot: ok`, `capabilities: ok`, `container: ok` |
-| `make test-cluster` | the node joins a control-plane VM with flannel, runs pods (under seccomp, in their own network namespace, with a lifecycle hook, plus a DaemonSet, a Deployment and nginx), and does it all again after a reboot | `node`, `flannel`, `pod`, `seccomp`, `netns pod`, `log pod`, `nginx`, `hook`, `daemonset`, `deployment`, `workloads`, `cluster` |
-| `make test-cluster-cni` | the same, with **Cilium** as the CNI | the same lines, with `cilium` in place of `flannel` |
+| `make test-cluster` | the node joins a control-plane VM with flannel, runs pods (under seccomp, in their own network namespace, with a lifecycle hook, sharing a PID namespace, plus a DaemonSet, a Deployment and nginx), and does it all again after a reboot | `node`, `flannel`, `pod`, `seccomp`, `netns pod`, `log pod`, `nginx`, `hook`, `pidns`, `daemonset`, `deployment`, `workloads`, `cluster`; `service`, `dns` and `egress` say `skipped` |
+| `make test-cluster-cni` | the same, with **Cilium** as the CNI, plus Services, cluster DNS and egress | the same lines, with `cilium` in place of `flannel`, and `service`, `dns` and `egress` as `ok` |
 
-**Expected times** on the development host with KVM:
+**Expected times**, measured from a fresh clone with empty Go caches, on the
+development host with KVM (2026-11-08):
 
-- a two-boot flannel cluster run takes about 75 s;
-- a Cilium run takes about 210 s.
+| Step | Cold | Warm |
+| --- | --- | --- |
+| `make kernel` | 4 min | under a minute, when nothing changed |
+| `make image` | 4 min | about 2 min |
+| `make test` | 10 s | 10 s |
+| `make test-cluster` | 3.7 min, about 1.5 of it building the control-plane binaries | about 75 s |
+| `make test-cluster-cni` | 7.4 min, mostly pulling Cilium's images into the node | about 210 s |
 
-The first `make kernel` and the first `DIT` dominate a cold start.
+So a cold `make test-all` takes about 20 minutes.
 
 Useful knobs:
 
@@ -90,19 +97,22 @@ The full table is in `docs/testing.md`.
 
 ## What works and what does not, yet
 
-Cilium is the CNI this project is heading for. The node is **not yet a complete
-worker**, and these are the known gaps, in the order they are being closed:
+Cilium is the CNI this project is heading for, with its kube-proxy replacement
+and BPF masquerading, so the image needs no `iptables` userland. On the Cilium
+leg a pod reaches a ClusterIP Service, resolves a cluster name through CoreDNS,
+and fetches an off-cluster address (`service`, `dns`, `egress`). The flannel leg
+has no service routing or NAT, and says `skipped` for those three. A pod in a
+`shareProcessNamespace` pod sees its sibling's processes (`pidns`).
 
-- **ClusterIP Services, cluster DNS and egress.** There is no kube-proxy. The plan
-  is Cilium's kube-proxy replacement with BPF masquerading, which needs no
-  `iptables` userland. Until then, a pod that talks to the apiserver must be
-  given its address directly.
+The node is **not yet a complete worker**. These are the known gaps:
+
 - **More than one node.** Every test boots a single worker.
 - **`kubectl exec -it`, `attach` and `port-forward`** are untested: the runc
-  fork's `ROADMAP.md` §3.
-- **`shareProcessNamespace` and `kubectl debug --target`** are refused by the runc
-  fork. A container init cannot join a PID namespace by path yet (`ROADMAP.md`
-  §4.2).
+  fork's `ROADMAP.md` §3. The test's control-plane VM cannot reach the node's
+  kubelet port, so the harness cannot exercise them yet either.
+- **`kubectl debug --target`** goes through the same runc path as
+  `shareProcessNamespace` (a container init joining a PID namespace by path), but
+  has no check of its own.
 - **Joining.** The node's kubelet credential is spliced into the image for each
   test run, and its name is fixed. TLS bootstrapping is designed in
   `docs/roadmap.md` but not built.
