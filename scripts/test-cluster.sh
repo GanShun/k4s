@@ -94,6 +94,7 @@ HOOK_POD=$EXAMPLES/hook-pod.yaml
 PIDNS_POD=$EXAMPLES/pidns-pod.yaml
 FLANNEL_DS=$EXAMPLES/flannel-ds.yaml
 DEPLOY=$EXAMPLES/deploy-pod.yaml
+SERVICE_POD=$EXAMPLES/service-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
@@ -650,6 +651,18 @@ collect() {
 	# which runs after stop_guest: reading the guest from there can only return an
 	# ssh error, so the field would always be empty or wrong.
 	wait_marker '/var/log/k4s-pidns/peer-cmdline' "$CP/markers/pidns-peer-cmdline" 'sleep'
+	# The service pod's own words, collected while the guest is up so the failure
+	# path does not have to ask a stopped guest. Only on the Cilium leg, where the
+	# pod exists: waiting 30s per boot for a marker that cannot appear also logs 15
+	# "no marker" lines to waits.log, which is noise in the one file that has to
+	# stay readable.
+	#
+	# The error file is not waited on at all: on success wget writes nothing, so
+	# there is nothing to wait for, and it is read only in the failure path.
+	if [ "$CNI" = cilium ]; then
+		wait_marker '/var/log/k4s-service/result' "$CP/markers/service-result" 'K4S_SERVICE'
+		guest_get 'cat /var/log/k4s-service/error 2>/dev/null' > "$CP/markers/service-error"
+	fi
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
 	# over the pod network instead, which is also the assertion that the pod
@@ -1012,6 +1025,67 @@ run_log_pod() {
 	return 1
 }
 
+# The Service check. There is no kube-proxy on this node and no iptables, so a
+# ClusterIP that answers is Cilium's eBPF doing the address translation -- the job
+# kube-proxy replacement exists to take over. Only the Cilium leg has a service
+# implementation, so the flannel leg says it skipped rather than failing on a
+# capability it never claimed.
+run_service() {
+	if [ "$CNI" != cilium ]; then
+		echo "service: skipped (flannel has no service implementation: no kube-proxy, no iptables)"
+		return 0
+	fi
+	log "exposing the nginx pod and fetching it by ClusterIP"
+	K delete pod k4s-service --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	K apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Service
+metadata:
+  name: k4s-nginx
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: k4s-nginx
+  ports:
+    - port: 80
+      targetPort: 80
+YAML
+	local ip i ph rendered=$CP/service-pod.yaml
+	# The address is allocated by the apiserver when the object is admitted, so it
+	# is read back rather than assumed: the service CIDR belongs to the control
+	# plane, not to this harness.
+	for i in $(seq 1 30); do
+		ip=$(K get svc k4s-nginx -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+		if [ -n "$ip" ] && [ "$ip" != None ]; then
+			break
+		fi
+		sleep 1
+	done
+	if [ -z "$ip" ] || [ "$ip" = None ]; then
+		echo "service: FAILED (the apiserver allocated no ClusterIP)" >&2
+		K get svc k4s-nginx -o yaml 2>&1 | tail -10 | sed 's/^/  /' >&2
+		return 1
+	fi
+	echo "nginx service: ClusterIP $ip"
+	# A pod cannot be handed a ClusterIP any other way: the downward API exposes the
+	# pod, and resolving the name would test DNS at the same time as the
+	# translation. One thing per check.
+	sed "s/__SVC_IP__/$ip/" "$SERVICE_POD" > "$rendered"
+	K apply -f "$rendered" >/dev/null
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-service -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			echo "service pod phase: Running"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "service pod: did not reach Running" >&2
+	K describe pod k4s-service 2>&1 | tail -20 | sed 's/^/  /' >&2
+	return 1
+}
+
 # The postStart hook pod. A lifecycle hook is a `runc exec` -- kubelet runs an
 # exec hook through the CRI's ExecSync, which is the same runtime call -- so this
 # is the end-to-end regression test for runc's `runcns` staging subcommand.
@@ -1207,6 +1281,20 @@ check_marker() {
 		return 1
 	fi
 	echo "pidns: ok (shareProcessNamespace pod: one container saw the other)"
+	if [ "$CNI" = cilium ]; then
+		# A ClusterIP that answers is Cilium's eBPF translating it: there is no
+		# kube-proxy on this node and no iptables. The page is the assertion,
+		# because "connected" would also be true of an error page.
+		if ! grep -q 'K4S_SERVICE_OK' "$m/service-result" 2>/dev/null; then
+			echo "service: FAILED (nothing answered on the ClusterIP)" >&2
+			sed 's/^/  /' "$m/service-result" 2>/dev/null >&2
+			printf '  its error: %s\n' "$(cat "$m/service-error" 2>/dev/null)" >&2
+			echo "  cause: with kubeProxyReplacement on this is the socket-level load" >&2
+			echo "  balancer; without it there is no service implementation at all" >&2
+			return 1
+		fi
+		echo "service: ok (a pod fetched nginx through its ClusterIP)"
+	fi
 	return 0
 }
 
@@ -1258,6 +1346,7 @@ echo "node: ok (registered and Ready)"
 run_pod
 run_netns_pod
 run_nginx
+run_service
 run_workloads
 run_log_pod
 run_hook
@@ -1290,6 +1379,7 @@ for n in $(seq 2 "$BOOTS"); do
 	# out. The control plane VM kept running throughout, which is the point.
 	run_netns_pod
 	run_nginx
+	run_service
 	run_workloads
 	run_hook
 	run_pidns

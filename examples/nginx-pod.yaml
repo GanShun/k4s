@@ -15,6 +15,9 @@ kind: Pod
 metadata:
   name: k4s-nginx
   namespace: default
+  # Selected by the k4s-nginx Service that test-cluster creates in the Cilium leg.
+  labels:
+    app: k4s-nginx
 spec:
   nodeName: k4s-node-1
   # Always, as with the other pods: the node is diskless, so a reboot wipes

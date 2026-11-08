@@ -1,0 +1,53 @@
+# The regression test for Cilium doing kube-proxy's job.
+#
+# There is no kube-proxy on this node and never has been: with
+# `kubeProxyReplacement=true` the address translation for a ClusterIP is Cilium's
+# eBPF, so a Service is the one object that fails outright if the socket-level load
+# balancer did not load. That makes it worth a verdict line of its own rather than
+# an inference from the pod network working.
+#
+# The address is substituted by the harness (`__SVC_IP__`) because a pod cannot be
+# told a ClusterIP any other way: the downward API exposes the pod, not a service,
+# and resolving the name would test DNS at the same time as the translation.
+# Testing one thing here is the point -- `dns: ok` covers the name.
+#
+# hostNetwork, like the other pods here, so that the *client* side of the request
+# cannot be mistaken for a broken Service: the backend is nginx on the pod network,
+# so a broken pod network still fails this check. What is isolated is everything on
+# the way out of the client.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-service
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  hostNetwork: true
+  restartPolicy: Always
+  containers:
+    - name: client
+      image: docker.io/library/busybox:1.36
+      command:
+        - "sh"
+        - "-c"
+        - >-
+          i=0;
+          while [ "$i" -lt 120 ]; do
+            if wget -q -T 2 -O /out/page "http://__SVC_IP__/" 2>/out/error &&
+              grep -q 'Welcome to nginx' /out/page; then
+              echo K4S_SERVICE_OK > /out/result;
+              exec sleep 3600;
+            fi;
+            i=$((i+1));
+            sleep 2;
+          done;
+          echo K4S_SERVICE_NO_ANSWER > /out/result;
+          exec sleep 3600
+      volumeMounts:
+        - name: out
+          mountPath: /out
+  volumes:
+    - name: out
+      hostPath:
+        path: /var/log/k4s-service
+        type: DirectoryOrCreate
