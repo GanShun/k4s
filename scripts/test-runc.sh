@@ -6,7 +6,7 @@
 # real container: namespaces, cgroups, mounts, seccomp, exec. It needs root, and
 # the shared CI runner does not have it -- `libcontainer-integration` in runc's
 # .gitlab-ci.yml probes for CAP_SYS_ADMIN first and reports that it is missing
-# (runc issue #4). The k4s node boots as root with CAP_SYS_ADMIN, which makes it
+# (an open issue on the fork). The k4s node boots as root with CAP_SYS_ADMIN, which makes it
 # the one place this suite can run at all.
 #
 # What the suite needs that the image does not give it, and what this provides:
