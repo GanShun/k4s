@@ -200,6 +200,15 @@ func controlPlane() {
 		"--service-account-signing-key-file=/etc/kubernetes/pki/sa.key",
 		"--service-account-issuer=https://10.0.2.2:6443",
 		"--service-cluster-ip-range=10.96.0.0/12",
+		// What the `kubernetes` Endpoints point at, and therefore what a pod's
+		// https://kubernetes.default.svc resolves to through the socket-level load
+		// balancer. Without it the apiserver advertises the control-plane VM's own
+		// address (10.0.2.15 in QEMU user-mode networking), which from inside the
+		// node VM is the node itself, so every in-cluster apiserver call fails and
+		// CoreDNS answers SERVFAIL for every cluster name. 10.0.2.2 is the host,
+		// where the control plane's 6443 is forwarded, and it is in the serving
+		// certificate's SANs.
+		"--advertise-address=10.0.2.2",
 		"--authorization-mode=AlwaysAllow",
 		"--allow-privileged=true")
 

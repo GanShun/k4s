@@ -95,6 +95,8 @@ PIDNS_POD=$EXAMPLES/pidns-pod.yaml
 FLANNEL_DS=$EXAMPLES/flannel-ds.yaml
 DEPLOY=$EXAMPLES/deploy-pod.yaml
 SERVICE_POD=$EXAMPLES/service-pod.yaml
+COREDNS=$EXAMPLES/coredns.yaml
+DNS_POD=$EXAMPLES/dns-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
@@ -195,6 +197,35 @@ gen_ssh_keys() {
 }
 
 gen_pki() {
+	# Kept in one place so a change to the SANs rebuilds the PKI instead of being
+	# ignored: this function returns early whenever the files exist, so an edit
+	# here used to do nothing and the run kept the old certificate. Measured --
+	# adding the apiserver's ClusterIP changed nothing until the PKI was deleted.
+	local alt
+	alt=$(cat <<'SAN'
+DNS.1=localhost
+DNS.2=kubernetes
+DNS.3=kubernetes.default
+DNS.4=kubernetes.default.svc
+DNS.5=kubernetes.default.svc.cluster.local
+IP.1=127.0.0.1
+IP.2=10.0.2.2
+IP.3=10.96.0.1
+SAN
+)
+	# The apiserver's own ClusterIP (first address of --service-cluster-ip-range) and
+	# its service names. A pod reaches the apiserver at https://kubernetes.default.svc,
+	# which the socket-level load balancer translates to IP.3; without these the
+	# handshake fails and the client reports it as a resolver error several layers
+	# up. Measured: CoreDNS answered SERVFAIL for every cluster name until added.
+	# A missing stamp counts as a change: a PKI made before this check existed has
+	# none, and it is exactly those checkouts that carry the certificate without the
+	# service SANs. Requiring the file to exist first made this condition false for
+	# every pre-existing PKI, which is the bug this was written to fix.
+	if [ "$(cat "$PKI/apiserver.sans" 2>/dev/null)" != "$alt" ]; then
+		log "the apiserver certificate's SANs changed; regenerating the PKI"
+		rm -rf "$PKI"
+	fi
 	if [ -f "$PKI/ca.crt" ] && [ -f "$NODEDIR/kubeconfig" ] && [ -f "$PKI/admin.kubeconfig" ]; then
 		return 0
 	fi
@@ -203,7 +234,10 @@ gen_pki() {
 	mkdir -p "$PKI"
 	openssl req -x509 -newkey rsa:2048 -nodes -keyout "$PKI/ca.key" -out "$PKI/ca.crt" \
 		-days 3650 -subj "/CN=k4s-test-ca" 2>/dev/null
-	cat > "$PKI/apiserver.cnf" <<'EOF'
+	# Unquoted on purpose: ${alt} has to be expanded into the section. Quoted, it
+	# lands in the file literally, the CSR ends up with no SANs, and the failure
+	# appears as a SERVFAIL from a resolver rather than as a certificate problem.
+	cat > "$PKI/apiserver.cnf" <<EOF
 [req]
 distinguished_name=dn
 req_extensions=v3
@@ -211,11 +245,9 @@ req_extensions=v3
 [v3]
 subjectAltName=@alt
 [alt]
-DNS.1=localhost
-DNS.2=kubernetes
-IP.1=127.0.0.1
-IP.2=10.0.2.2
+${alt}
 EOF
+	printf '%s' "$alt" > "$PKI/apiserver.sans"
 	openssl req -newkey rsa:2048 -nodes -keyout "$PKI/apiserver.key" -out "$PKI/apiserver.csr" \
 		-subj "/CN=kube-apiserver" -config "$PKI/apiserver.cnf" 2>/dev/null
 	openssl x509 -req -in "$PKI/apiserver.csr" -CA "$PKI/ca.crt" -CAkey "$PKI/ca.key" \
@@ -662,6 +694,15 @@ collect() {
 	if [ "$CNI" = cilium ]; then
 		wait_marker '/var/log/k4s-service/result' "$CP/markers/service-result" 'K4S_SERVICE'
 		guest_get 'cat /var/log/k4s-service/error 2>/dev/null' > "$CP/markers/service-error"
+		wait_marker '/var/log/k4s-dns/result' "$CP/markers/dns-result" 'K4S_DNS'
+		guest_get 'cat /var/log/k4s-dns/lookup 2>/dev/null' > "$CP/markers/dns-lookup"
+		guest_get 'cat /var/log/k4s-dns/error 2>/dev/null' > "$CP/markers/dns-error"
+		# CoreDNS's own words, while the guest is still up: a SERVFAIL is answered
+		# here and nowhere else, and by the time check_marker runs the pod is gone.
+		# With the host's kubectl, not the guest's: the node image carries no
+		# kubectl, so a guest-side call fails with "executable file not found" --
+		# which is exactly what it did, and it looked like CoreDNS saying nothing.
+		K -n kube-system logs -l app=k4s-coredns --tail=40 > "$CP/markers/coredns-log" 2>&1 || true
 	fi
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
@@ -1086,6 +1127,49 @@ YAML
 	return 1
 }
 
+# The DNS check. CoreDNS from the node's own binary, a kube-dns Service at the
+# address kubelet would be told about, and a pod that resolves a cluster name and
+# then fetches by it. Cilium-only for the same reason the service check is: flannel
+# routes no ClusterIP, so 10.96.0.10 could never be reached there.
+run_dns() {
+	if [ "$CNI" != cilium ]; then
+		echo "dns: skipped (flannel has no service routing, so a kube-dns ClusterIP is unreachable)"
+		return 0
+	fi
+	log "applying CoreDNS, its Service, and the pod that resolves through it"
+	K delete pod k4s-dns --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	K delete deployment k4s-coredns -n kube-system --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	K apply -f "$COREDNS" >/dev/null
+	local i ready ph
+	for i in $(seq 1 90); do
+		ready=$(K -n kube-system get deployment k4s-coredns \
+			-o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+		if [ "${ready:-0}" = 1 ]; then
+			echo "coredns: Running and Ready"
+			break
+		fi
+		sleep 2
+	done
+	if [ "${ready:-0}" != 1 ]; then
+		echo "dns: FAILED (CoreDNS never became Ready)" >&2
+		K -n kube-system describe pod -l app=k4s-coredns 2>&1 | tail -25 | sed 's/^/  /' >&2
+		K -n kube-system logs -l app=k4s-coredns --tail=30 2>&1 | sed 's/^/  /' >&2
+		return 1
+	fi
+	K apply -f "$DNS_POD" >/dev/null
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-dns -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			echo "dns pod phase: Running"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "dns pod: did not reach Running" >&2
+	K describe pod k4s-dns 2>&1 | tail -20 | sed 's/^/  /' >&2
+	return 1
+}
+
 # The postStart hook pod. A lifecycle hook is a `runc exec` -- kubelet runs an
 # exec hook through the CRI's ExecSync, which is the same runtime call -- so this
 # is the end-to-end regression test for runc's `runcns` staging subcommand.
@@ -1294,6 +1378,20 @@ check_marker() {
 			return 1
 		fi
 		echo "service: ok (a pod fetched nginx through its ClusterIP)"
+		# The name only exists if CoreDNS's kubernetes plugin read the Service out of
+		# the apiserver, and it only reached CoreDNS if the kube-dns ClusterIP was
+		# translated -- both of which need replacement mode and the certificate SANs.
+		if ! grep -q 'K4S_DNS_OK' "$m/dns-result" 2>/dev/null; then
+			echo "dns: FAILED (a pod could not resolve and use a cluster name)" >&2
+			sed 's/^/  /' "$m/dns-result" 2>/dev/null >&2
+			printf '  lookup said:\n' >&2
+			sed 's/^/    /' "$m/dns-lookup" 2>/dev/null >&2
+			printf '  its error: %s\n' "$(cat "$m/dns-error" 2>/dev/null)" >&2
+			echo "  coredns said:" >&2
+			sed 's/^/    /' "$m/coredns-log" 2>/dev/null >&2
+			return 1
+		fi
+		echo "dns: ok (a pod resolved k4s-nginx.default.svc.cluster.local and used it)"
 	fi
 	return 0
 }
@@ -1347,6 +1445,7 @@ run_pod
 run_netns_pod
 run_nginx
 run_service
+run_dns
 run_workloads
 run_log_pod
 run_hook
@@ -1380,6 +1479,7 @@ for n in $(seq 2 "$BOOTS"); do
 	run_netns_pod
 	run_nginx
 	run_service
+	run_dns
 	run_workloads
 	run_hook
 	run_pidns
