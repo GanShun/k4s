@@ -1,0 +1,52 @@
+# The egress check: a pod fetching something outside the cluster.
+#
+# With `bpf.masquerade=true`, Cilium rewrites the pod's source address to the
+# node's on the way out and back on the return path. If that rewrite is not
+# happening the packet still leaves, but the reply has nowhere to go -- so the
+# assertion is a *completed* fetch, not an attempted one. That is the difference
+# between "egress is configured" and "egress works".
+#
+# Nothing on the node can answer this: the address has to be off-cluster, or the
+# masquerade is never exercised. `example.com` over plain HTTP because the point is
+# the address translation, not TLS, and busybox has no CA bundle of its own.
+#
+# dnsPolicy stays ClusterFirst: kubelet has no clusterDNS on this image, so the pod
+# gets the node's resolver, which reaches the outside world. That also means this
+# check does not depend on CoreDNS -- `dns: ok` is the check that does.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k4s-egress
+  namespace: default
+spec:
+  nodeName: k4s-node-1
+  # On the pod network, not hostNetwork: a hostNetwork pod's traffic is the node's,
+  # so it would prove nothing about translating a pod's address.
+  restartPolicy: Always
+  containers:
+    - name: client
+      image: docker.io/library/busybox:1.36
+      command:
+        - "sh"
+        - "-c"
+        - >-
+          i=0;
+          while [ "$i" -lt 60 ]; do
+            if wget -q -T 5 -O /out/page http://example.com/ 2>/out/error &&
+              grep -qi 'example domain' /out/page; then
+              echo K4S_EGRESS_OK > /out/result;
+              exec sleep 3600;
+            fi;
+            i=$((i+1));
+            sleep 2;
+          done;
+          echo K4S_EGRESS_NO_ANSWER > /out/result;
+          exec sleep 3600
+      volumeMounts:
+        - name: out
+          mountPath: /out
+  volumes:
+    - name: out
+      hostPath:
+        path: /var/log/k4s-egress
+        type: DirectoryOrCreate

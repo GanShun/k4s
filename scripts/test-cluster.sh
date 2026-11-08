@@ -97,6 +97,7 @@ DEPLOY=$EXAMPLES/deploy-pod.yaml
 SERVICE_POD=$EXAMPLES/service-pod.yaml
 COREDNS=$EXAMPLES/coredns.yaml
 DNS_POD=$EXAMPLES/dns-pod.yaml
+EGRESS_POD=$EXAMPLES/egress-pod.yaml
 BOOTS=${K4S_BOOTS:-2}
 # flannel is the default because it needs nothing from the kernel that this one
 # lacks. K4S_CNI=cilium runs the same test with Cilium instead, which needs the
@@ -703,6 +704,8 @@ collect() {
 		# kubectl, so a guest-side call fails with "executable file not found" --
 		# which is exactly what it did, and it looked like CoreDNS saying nothing.
 		K -n kube-system logs -l app=k4s-coredns --tail=40 > "$CP/markers/coredns-log" 2>&1 || true
+		wait_marker '/var/log/k4s-egress/result' "$CP/markers/egress-result" 'K4S_EGRESS'
+		guest_get 'cat /var/log/k4s-egress/error 2>/dev/null' > "$CP/markers/egress-error"
 	fi
 	# The off-the-shelf pod has no marker to read: nginx has no shell command to
 	# hang one off and writes nothing to a hostPath. The node fetches its page
@@ -1170,6 +1173,32 @@ run_dns() {
 	return 1
 }
 
+# The egress check: a pod fetching something off-cluster, which only completes if
+# the masquerade rewrites its address on the way out and back. Cilium-only -- the
+# flannel leg has no masquerade at all (no iptables), so it says so rather than
+# failing on a capability it never claimed.
+run_egress() {
+	if [ "$CNI" != cilium ]; then
+		echo "egress: skipped (flannel has no masquerade: no iptables, no NAT)"
+		return 0
+	fi
+	log "applying the pod that fetches off-cluster"
+	K delete pod k4s-egress --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	K apply -f "$EGRESS_POD" >/dev/null
+	local i ph
+	for i in $(seq 1 90); do
+		ph=$(K get pod k4s-egress -o jsonpath='{.status.phase}' 2>/dev/null || true)
+		if [ "$ph" = Running ]; then
+			echo "egress pod phase: Running"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "egress pod: did not reach Running" >&2
+	K describe pod k4s-egress 2>&1 | tail -20 | sed 's/^/  /' >&2
+	return 1
+}
+
 # The postStart hook pod. A lifecycle hook is a `runc exec` -- kubelet runs an
 # exec hook through the CRI's ExecSync, which is the same runtime call -- so this
 # is the end-to-end regression test for runc's `runcns` staging subcommand.
@@ -1392,6 +1421,17 @@ check_marker() {
 			return 1
 		fi
 		echo "dns: ok (a pod resolved k4s-nginx.default.svc.cluster.local and used it)"
+		# A completed fetch from a pod on the pod network to an address off-cluster:
+		# the reply can only arrive if the masquerade rewrote the source address.
+		if ! grep -q 'K4S_EGRESS_OK' "$m/egress-result" 2>/dev/null; then
+			echo "egress: FAILED (a pod could not fetch anything off-cluster)" >&2
+			sed 's/^/  /' "$m/egress-result" 2>/dev/null >&2
+			printf '  its error: %s\n' "$(cat "$m/egress-error" 2>/dev/null)" >&2
+			echo "  cause: with bpf.masquerade on this is the address rewrite; check" >&2
+			echo "  the agent log for datapath errors first" >&2
+			return 1
+		fi
+		echo "egress: ok (a pod fetched an off-cluster address through the masquerade)"
 	fi
 	return 0
 }
@@ -1446,6 +1486,7 @@ run_netns_pod
 run_nginx
 run_service
 run_dns
+run_egress
 run_workloads
 run_log_pod
 run_hook
@@ -1480,6 +1521,7 @@ for n in $(seq 2 "$BOOTS"); do
 	run_nginx
 	run_service
 	run_dns
+	run_egress
 	run_workloads
 	run_hook
 	run_pidns

@@ -24,6 +24,13 @@ Cilium's chart with `helm template` and applies that instead. One kernel runs
 either: `make kernel` applies both fragments, so the two cluster tests differ only
 in what they install on the node.
 
+The Cilium leg is the only part of either test whose outcome depends on something
+outside the two VMs: its `egress:` verdict has a pod fetch `http://example.com/`,
+because the address translation under test is only exercised by a destination that
+is off-cluster. Everything else is answered by the control-plane VM, by the node, or
+by the images already pulled. Where the host has no route to the internet, that one
+line fails and the rest of the run is still meaningful.
+
 **`make test-runc`** — runc's own `libcontainer/integration` suite, inside the
 node. It is the suite that checks the fork's claims against a real container, and
 it needs root: namespaces, cgroups, mounts, seccomp, `runc exec`. The shared CI
