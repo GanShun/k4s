@@ -432,6 +432,8 @@ build_cilium() {
 	"$HELM" template cilium "$CP/charts/cilium" --namespace kube-system \
 		--set k8sServiceHost=10.0.2.2 --set k8sServicePort="$PORT" \
 		--set ipam.mode=kubernetes \
+		--set kubeProxyReplacement=true \
+		--set bpf.masquerade=true \
 		--set operator.replicas=1 \
 		--set hubble.enabled=false --set hubble.relay.enabled=false \
 		--set hubble.ui.enabled=false > "$CILIUM_YAML"
@@ -472,6 +474,10 @@ boot() {
 	# reason, one boot later.
 	rm -f "$CP/markers"/*
 	rm -f "$CP/diag/waits.log"
+	# The moment this boot began, RFC3339 UTC. A container's startedAt is the same
+	# format, so "started after this boot" is a string comparison -- and that is
+	# what makes a readiness reading this boot's rather than the previous boot's.
+	BOOT_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	# Nothing is fed to this guest. The node brings itself up: u-root's init runs
 	# /bin/uinit, a Go program built from cmd/uinit, which brings up the network,
 	# sshd, the mounts and cgroups, containerd and kubelet. The console is still
@@ -869,7 +875,45 @@ run_cilium() {
 				# 10-flannel.conflist.cilium_bak, and a substring grep for
 				# 10-flannel.conflist matched that backup name.
 				if printf '%s' "$listing" | grep -q '^05-cilium\.conflist$'; then
-					echo "cilium: ok (the agent is running, and its CNI config is on the node)"
+					# The agent being Running is not the CNI working, and the
+					# absence of a complaint in its log is not evidence either: a
+					# grep for one wording fails open when it cannot read the log
+					# and races the failure it looks for.
+					#
+					# Not `kubectl exec ... cilium-dbg` either: that goes apiserver ->
+					# https://k4s-node-1:10250, which the control plane VM cannot
+					# reach -- it is why this harness reads the node over ssh at all.
+					#
+					# So ask the API for readiness, and require the container to have
+					# started *after this boot*: the pod object outlives a reboot, so
+					# a bare `.ready` can still be the previous boot's answer.
+					#
+					# This compares a timestamp the guest's kubelet wrote against the
+					# host's clock. That is sound here and only here: QEMU seeds the
+					# guest RTC from the host in UTC and the agent starts seconds
+					# after launch, so the two agree far beyond the margin used.
+					local health="" i_health readiness=
+					for i_health in $(seq 1 90); do
+						readiness=$(K get pod -n kube-system -l k8s-app=cilium \
+							-o jsonpath='{.items[0].status.containerStatuses[?(@.name=="cilium-agent")].ready} {.items[0].status.containerStatuses[?(@.name=="cilium-agent")].state.running.startedAt}' \
+							2>/dev/null || true)
+						set -- $readiness
+						if [ "${1:-}" = true ] && [ -n "${2:-}" ] &&
+							[ ! "${2:-}" \< "$BOOT_STARTED" ]; then
+							health=ready
+							break
+						fi
+						sleep 2
+					done
+					if [ -z "$health" ]; then
+						echo "cilium: FAILED (the agent is not Ready, or its container predates this boot)" >&2
+						printf '  ready/startedAt: %s (this boot began %s)\n' \
+							"$readiness" "$BOOT_STARTED" >&2
+						guest_get "grep -m3 -e 'Failed to initialize datapath' -e 'no BTF found' /var/log/pods/*cilium-*/cilium-agent/*.log 2>/dev/null" >&2
+						echo "  cause: Cilium's programs are CO-RE and need CONFIG_DEBUG_INFO_BTF" >&2
+						return 1
+					fi
+					echo "cilium: ok (the agent is Ready in this boot, its CNI config is on the node)"
 					return 0
 				fi
 				sleep 2
