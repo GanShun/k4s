@@ -149,7 +149,10 @@ kb_wait || { echo "boot: FAILED (sshd never answered)" >&2; exit 1; }
 
 echo "running the suite in the guest (timeout ${K4S_CMD_TIMEOUT}s)"
 rc=0
-kb_ssh "$K4S_CMD_TIMEOUT" '/k4s/run.sh' > "$KB_WORK/out" 2>&1 || rc=$?
+# </dev/null for the same reason as the boot probe: the guest's sshd ends a
+# non-PTY session only at stdin EOF, so a terminal on stdin keeps the session open
+# past the command and the run sits until K4S_CMD_TIMEOUT.
+kb_ssh "$K4S_CMD_TIMEOUT" '/k4s/run.sh' </dev/null > "$KB_WORK/out" 2>&1 || rc=$?
 
 kb_stop
 cp "$KB_WORK/out" "$KB_OUT"

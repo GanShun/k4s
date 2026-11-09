@@ -54,6 +54,19 @@ set -Eeuo pipefail
 # line number turns that from a guess into a fact.
 trap 'echo "test-cluster.sh: failed at line $LINENO (exit $?)" >&2' ERR
 
+# This harness never reads stdin: it drives the guest by ssh and by files, and its
+# only console use is the log QEMU writes. Saying so once, here, is what keeps the
+# guest's sshd from waiting on the terminal that started the run -- u-root's sshd
+# ends a non-PTY session only when the client's stdin reaches EOF
+# (cmds/core/sshd/sshd.go, `e.Stdin = c`, and exec.Cmd.Run waits for that copy), and
+# a terminal never sends EOF. Without this, every call from a shell runs its command,
+# lets the command exit, and holds the session open until the timeout kills it.
+#
+# It is also why there is no ssh multiplexing: a ControlPersist master inherits this
+# process's descriptors, and the session it holds open never closes, so the master
+# never exits either.
+exec </dev/null
+
 # K4S_XTRACE=1 runs the harness with `set -x`, traced to a file. The trace names
 # the command that failed, and that is the only reliable way to find a failure
 # `set -e` reports as a bare exit status: the ERR trap above does not fire for an
@@ -542,10 +555,6 @@ boot() {
 # simply waits for termination.
 stop_guest() {
 	local pid
-	# Close the multiplexed connection before the VM goes, or the master sits on a
-	# socket for a guest that no longer exists and the next boot's first call
-	# inherits it. A long ControlPersist would expire it eventually; this is immediate.
-	ssh -o ControlPath="$CP/ssh-ctl-$SSH_PORT" -O exit root@127.0.0.1 2>/dev/null || true
 	pid=$(cat "$CP/qemu.pid" 2>/dev/null || true)
 	[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
 	local i
@@ -580,17 +589,34 @@ guest_get() {
 	# transport failure is written into a marker and then reported as a failed check.
 	# Measured: 6 of 20 Cilium runs had that happen at least once.
 	#
-	# Two changes, and they are different: multiplex so a boot makes one connection
-	# instead of dozens (u-root's sshd does not obviously tolerate the rate), and
-	# retry the *connection* once, never the command -- retrying a command that
-	# legitimately failed would hide a real defect behind a slow one.
+	# One change: retry the *connection* once, never the command -- retrying a
+	# command that legitimately failed would hide a real defect behind a slow one.
+	#
+	# stdin is /dev/null for the whole harness (see `exec </dev/null` at the top), so
+	# these calls are non-PTY sessions whose client stdin reaches EOF at once and end
+	# when the command does. That is what makes the harness work from a shell: without
+	# it, u-root's sshd holds every session open until the timeout, because it waits
+	# for that stdin EOF (cmds/core/sshd/sshd.go, `e.Stdin = c`, and exec.Cmd.Run waits
+	# for the copy).
+	#
+	# `|| true` is on every call because u-root's sshd reports ANY non-zero exit
+	# status as ssh's own 255, silently -- measured on a booted node: `true` gives 0,
+	# while `exit 3` and `cat /nonexistent` both give 255. So a caller's command
+	# failing is indistinguishable from a dead connection, and the distinction is the
+	# whole basis of the retry below. With the command forced to succeed, 255 means
+	# only one thing. What the caller actually wanted is in the output, or in the
+	# absence of it -- a marker file that is not there yet reads as empty, which is
+	# the truth, instead of as a transport error written into the marker and reported
+	# as a failed check.
+	#
+	# -k on the timeout is the same argument applied to signals: ssh can defer
+	# SIGTERM, so without a follow-up SIGKILL an 8-second timeout is a hope.
 	for attempt in 1 2; do
-		if out=$(timeout 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
+		if out=$(timeout -k 2 8 ssh -o LogLevel=ERROR -o StrictHostKeyChecking=no \
 			-o UserKnownHostsFile=/dev/null -o BatchMode=yes \
-			-o ConnectTimeout=5 -o ControlMaster=auto \
-			-o ControlPath="$CP/ssh-ctl-%p" -o ControlPersist=300 \
+			-o ConnectTimeout=5 \
 			-i "$SSH/client" -p "$SSH_PORT" \
-			root@127.0.0.1 "$@" 2>&1); then
+			root@127.0.0.1 "$@" "|| true" 2>&1); then
 			rc=0
 			break
 		else
@@ -603,7 +629,7 @@ guest_get() {
 		# the call after the largest read (~206 KB of cilium-agent.log), inside the
 		# tight `ls /etc/cni/net.d` polling loop, and once more on the next boot. So
 		# both a large transfer and a burst of connections are implicated, and neither
-		# is established as the cause; ControlPersist 10s vs 300s changed nothing.
+		# is established as the cause.
 		#
 		# The retry is kept because it makes every run green, and the residue is
 		# k4s#4 rather than a mystery: the session dying is a property of the node's

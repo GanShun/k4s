@@ -151,7 +151,12 @@ kb_ssh() {
 # budget: a boot that is ready in six seconds should not cost two minutes.
 kb_wait() {
 	local deadline=$((SECONDS + K4S_BOOT_TIMEOUT))
-	until kb_ssh 8 true >/dev/null 2>&1; do
+	# </dev/null because u-root's sshd ends a non-PTY session only when the
+	# client's stdin reaches EOF, and exec.Cmd.Run waits for that copy: a probe that
+	# inherits a terminal runs true, exits, and still holds the session until the
+	# timeout kills it. It cannot be -n inside kb_ssh, because test-boot.sh feeds the
+	# check script to the guest on stdin.
+	until kb_ssh 8 true </dev/null >/dev/null 2>&1; do
 		if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$KB_QPID" 2>/dev/null; then
 			return 1
 		fi
